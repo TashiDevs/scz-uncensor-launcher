@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "snowbreak-uncensor-launcher"
+version = "0.1.0"
+description = "Local Windows launcher for Snowbreak uncensor pak setup"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-only"
+dependencies = [
+    "PySide6>=6.7.0",
+    "requests>=2.32.0",
+]
+
+[project.scripts]
+snowbreak-launcher = "snowbreak_launcher.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

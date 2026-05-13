@@ -1,0 +1,31 @@
+# Local configuration and runtime state
+.env
+.venv/
+.snowbreak_launcher/
+
+# Python caches and packaging metadata
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Build and release artifacts
+build/
+dist/
+*.spec
+*.exe
+*.msi
+*.zip
+*.7z
+*.pak
+
+# Local tooling downloads
+tools/
+
+# Logs
+*.log
+
+# Temporary smoke-test folders
+tmp*/
