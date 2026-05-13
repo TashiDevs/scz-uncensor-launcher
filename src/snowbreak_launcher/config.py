@@ -60,6 +60,8 @@ def load_state() -> LauncherState:
             setattr(state, key, value)
     if not isinstance(state.installed_files, dict):
         state.installed_files = {}
+    if not isinstance(state.static_asset_pack, dict):
+        state.static_asset_pack = {}
     return state
 
 

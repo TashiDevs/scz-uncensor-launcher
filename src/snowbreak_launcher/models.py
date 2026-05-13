@@ -45,3 +45,4 @@ class LauncherState:
     last_check_time: str | None = None
     installed_release: str | None = None
     installed_files: dict[str, str] = field(default_factory=dict)
+    static_asset_pack: dict[str, object] = field(default_factory=dict)

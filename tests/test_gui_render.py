@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import tempfile
@@ -11,6 +12,10 @@ import tests.context  # noqa: F401
 from snowbreak_launcher.constants import STATIC_ASSET_NAMES
 from snowbreak_launcher.models import GitHubRelease, InstallInfo, LauncherState
 from snowbreak_launcher.update_logic import UpdateDecision
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 class GuiRenderTests(unittest.TestCase):
@@ -121,7 +126,7 @@ class GuiRenderTests(unittest.TestCase):
             state = LauncherState(
                 accepted_notice=True,
                 installed_release="AntiAmend-old",
-                installed_files={"core.pak": "hash"},
+                installed_files={"core.pak": _sha("core")},
             )
 
             with patch("snowbreak_launcher.app.load_state", return_value=state):

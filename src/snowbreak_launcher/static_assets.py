@@ -9,6 +9,8 @@ import requests
 
 from .config import append_log, downloads_dir
 from .constants import DEFAULT_STATIC_ASSET_SHA256, DEFAULT_STATIC_ASSET_URL, MANAGED_FOLDER_NAME, STATIC_ASSET_NAMES
+from .github_client import file_sha256
+from .models import LauncherState
 
 
 class StaticAssetError(RuntimeError):
@@ -84,6 +86,32 @@ def import_static_zip(zip_path: Path, ix_folder: Path) -> list[str]:
     return sorted(installed)
 
 
+def static_pack_is_current(ix_folder: Path, state: LauncherState, url: str, sha256: str) -> bool:
+    if not _static_files_present(ix_folder):
+        return False
+    pack = state.static_asset_pack if isinstance(state.static_asset_pack, dict) else {}
+    if not pack:
+        return True
+    expected = {"url": url, "sha256": sha256.lower()}
+    if pack.get("url") != expected["url"] or pack.get("sha256") != expected["sha256"]:
+        return False
+    if "files" not in pack:
+        return True
+    return _static_files_match_record(ix_folder, pack.get("files"))
+
+
+def remember_static_pack(ix_folder: Path, state: LauncherState, url: str, sha256: str) -> None:
+    state.static_asset_pack = {
+        "url": url,
+        "sha256": sha256.lower(),
+        "files": {
+            name: file_sha256(ix_folder / name)
+            for name in sorted(STATIC_ASSET_NAMES)
+            if (ix_folder / name).is_file()
+        },
+    }
+
+
 def _reject_unsafe_member(member_name: str) -> None:
     path = Path(member_name)
     if path.is_absolute() or ".." in path.parts:
@@ -93,3 +121,20 @@ def _reject_unsafe_member(member_name: str) -> None:
 def _validate_static_target(ix_folder: Path) -> None:
     if ix_folder.name.lower() != MANAGED_FOLDER_NAME.lower() or ix_folder.parent.name.lower() != "paks":
         raise StaticAssetError(f"Refusing to install static assets into unexpected folder: {ix_folder}")
+
+
+def _static_files_present(ix_folder: Path) -> bool:
+    return all((ix_folder / name).is_file() for name in STATIC_ASSET_NAMES)
+
+
+def _static_files_match_record(ix_folder: Path, files: object) -> bool:
+    if not isinstance(files, dict):
+        return False
+    for name in STATIC_ASSET_NAMES:
+        expected_hash = files.get(name)
+        if not isinstance(expected_hash, str) or not expected_hash:
+            return False
+        target = ix_folder / name
+        if not target.is_file() or file_sha256(target).lower() != expected_hash.lower():
+            return False
+    return True
