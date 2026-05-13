@@ -8,6 +8,11 @@ from pathlib import Path
 from .constants import MANAGED_FOLDER_NAME, OLD_BUILD_CUTOFF_ISO, PAKS_RELATIVE_PARTS, STEAM_APP_ID
 from .models import InstallInfo
 
+SEASUN_STANDALONE_REGISTRY_KEY = r"SOFTWARE\SeasunGameSnowBreakOs\InstalledGamePath"
+SEASUN_STANDALONE_REGISTRY_VALUE = "snowbreak"
+SEASUN_BASE_FOLDER_NAME = "SeasunSnowBreakOs"
+SEASUN_NESTED_GAME_PARTS = ("Game", "snowbreak")
+
 
 def auto_detect_install() -> InstallInfo | None:
     for candidate in (*_detect_steam_installs(), *_detect_standalone_installs()):
@@ -123,7 +128,11 @@ def _manual_root_candidates(path: Path) -> list[tuple[Path, str, Path | None]]:
         common = path.parent / "common"
         candidates.append((common / "SNOWBREAK", "Steam", common))
 
-    candidates.append((path, _guess_install_type(path), _steam_common_for_game_root(path)))
+    guessed_type = _guess_install_type(path)
+    candidates.append((path, guessed_type, _steam_common_for_game_root(path)))
+    if guessed_type == "Standalone":
+        for root in _standalone_game_root_candidates(path):
+            candidates.append((root, "Standalone", None))
     if (path / "SNOWBREAK").exists():
         candidates.append((path / "SNOWBREAK", "Steam", path))
 
@@ -177,19 +186,29 @@ def _find_standalone_launcher(game_root: Path) -> Path | None:
         "launcher.exe",
         "Launcher.exe",
     )
-    for name in names:
-        candidate = game_root / name
-        if candidate.exists():
-            return candidate
-
-    try:
-        for candidate in game_root.glob("*.exe"):
-            lowered = candidate.name.lower()
-            if "launcher" in lowered or "snowbreak" in lowered:
+    for search_root in _standalone_launcher_search_roots(game_root):
+        for name in names:
+            candidate = search_root / name
+            if candidate.exists():
                 return candidate
-    except OSError:
-        return None
+
+        try:
+            for candidate in search_root.glob("*.exe"):
+                lowered = candidate.name.lower()
+                if "launcher" in lowered or "snowbreak" in lowered or "seasun" in lowered:
+                    return candidate
+        except OSError:
+            continue
     return None
+
+
+def _standalone_launcher_search_roots(game_root: Path) -> list[Path]:
+    roots = [game_root]
+    if game_root.name.lower() == "snowbreak":
+        roots.append(game_root.parent)
+        if game_root.parent.name.lower() == "game":
+            roots.append(game_root.parent.parent)
+    return _unique_paths([root for root in roots if root.exists()])
 
 
 def _collect_warnings(
@@ -284,13 +303,14 @@ def _steam_libraries(steam_root: Path) -> list[Path]:
 
 def _standalone_root_candidates() -> list[Path]:
     candidates: list[Path] = []
+    candidates.extend(_seasun_standalone_registry_locations())
     candidates.extend(_standalone_registry_locations())
 
     for env_name in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
         base = os.environ.get(env_name)
         if not base:
             continue
-        for child in ("Snowbreak", "SNOWBREAK", "Seasun\\Snowbreak"):
+        for child in ("Snowbreak", "SNOWBREAK", "Seasun\\Snowbreak", SEASUN_BASE_FOLDER_NAME):
             candidates.append(Path(base) / child)
 
     for drive in ("C:", "D:", "E:"):
@@ -299,9 +319,54 @@ def _standalone_root_candidates() -> list[Path]:
                 Path(drive) / "Snowbreak",
                 Path(drive) / "SNOWBREAK",
                 Path(drive) / "Seasun" / "Snowbreak",
+                Path(drive) / SEASUN_BASE_FOLDER_NAME,
             ]
         )
-    return [path for path in _unique_paths(candidates) if path.exists()]
+
+    expanded: list[Path] = []
+    for candidate in candidates:
+        expanded.extend(_standalone_game_root_candidates(candidate))
+    return [path for path in _unique_paths(expanded) if path.exists()]
+
+
+def _standalone_game_root_candidates(path: Path) -> list[Path]:
+    candidates = [path]
+    if path.name.lower() == SEASUN_BASE_FOLDER_NAME.lower():
+        candidates.append(path.joinpath(*SEASUN_NESTED_GAME_PARTS))
+    if path.name.lower() == "game" and path.parent.name.lower() == SEASUN_BASE_FOLDER_NAME.lower():
+        candidates.append(path / "snowbreak")
+    return candidates
+
+
+def _seasun_standalone_registry_locations() -> list[Path]:
+    if os.name != "nt":
+        return []
+    try:
+        import winreg
+    except ImportError:
+        return []
+
+    access_flags = [0]
+    for flag_name in ("KEY_WOW64_64KEY", "KEY_WOW64_32KEY"):
+        flag = getattr(winreg, flag_name, 0)
+        if flag:
+            access_flags.append(flag)
+
+    locations: list[Path] = []
+    for access_flag in access_flags:
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                SEASUN_STANDALONE_REGISTRY_KEY,
+                0,
+                winreg.KEY_READ | access_flag,
+            ) as key:
+                path = _registry_path_value(_query_registry_string(winreg, key, SEASUN_STANDALONE_REGISTRY_VALUE))
+                if path:
+                    locations.append(path)
+        except OSError:
+            continue
+    return _unique_paths(locations)
 
 
 def _standalone_registry_locations() -> list[Path]:
@@ -344,6 +409,13 @@ def _query_registry_string(winreg_module, key, value_name: str) -> str:
     except OSError:
         return ""
     return str(value)
+
+
+def _registry_path_value(value: str) -> Path | None:
+    text = os.path.expandvars(value).strip().strip('"').strip("'").strip()
+    if not text:
+        return None
+    return Path(text)
 
 
 def _parse_vdf_value(text: str, key: str) -> str | None:
