@@ -11,6 +11,7 @@ from unittest.mock import patch
 import tests.context  # noqa: F401
 from snowbreak_launcher.constants import STATIC_ASSET_NAMES
 from snowbreak_launcher.models import GitHubRelease, InstallInfo, LauncherState
+from snowbreak_launcher.self_update import LauncherUpdateInfo
 from snowbreak_launcher.update_logic import UpdateDecision
 
 
@@ -174,6 +175,32 @@ class GuiRenderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             with patch.object(launcher_app.sys, "_MEIPASS", temp, create=True):
                 self.assertEqual(launcher_app._asset_path("images", "background.png"), Path(temp) / "assets" / "images" / "background.png")
+
+    def test_footer_includes_app_version_and_launcher_update_button(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)):
+            qt_app = create_application([])
+            app = SnowbreakLauncherApp()
+        try:
+            app.launcher_update = LauncherUpdateInfo(
+                tag_name="v1.04",
+                html_url="https://example.invalid/release",
+                asset_name="SnowbreakUncensorLauncher.exe",
+                asset_size=123,
+                asset_sha256="a" * 64,
+                download_url="https://example.invalid/SnowbreakUncensorLauncher.exe",
+            )
+            app.ui_state = "ready_to_install"
+            app._render()
+            qt_app.processEvents()
+
+            self.assertEqual(app._watermark_text(), "by Tashi - v1.03")
+            self.assertFalse(app.self_update_button.isHidden())
+        finally:
+            app.close()
+            app.deleteLater()
 
 
 if __name__ == "__main__":
