@@ -14,6 +14,7 @@ from snowbreak_launcher.models import LauncherState
 from snowbreak_launcher.static_assets import (
     StaticAssetError,
     configured_static_download,
+    download_static_zip,
     import_static_zip,
     remember_static_pack,
     static_pack_is_current,
@@ -79,6 +80,27 @@ class StaticAssetTests(unittest.TestCase):
 
             with self.assertRaises(StaticAssetError):
                 import_static_zip(zip_path, root / "Game" / "Content" / "Paks" / "~ix")
+
+    def test_static_zip_download_removes_temp_after_hash_failure(self) -> None:
+        class FakeResponse:
+            headers = {"Content-Length": "3"}
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_content(self, chunk_size: int):
+                yield b"bad"
+
+        with tempfile.TemporaryDirectory() as temp:
+            downloads = Path(temp)
+            with (
+                patch("snowbreak_launcher.static_assets.downloads_dir", return_value=downloads),
+                patch("snowbreak_launcher.static_assets.requests.get", return_value=FakeResponse()),
+            ):
+                with self.assertRaises(StaticAssetError):
+                    download_static_zip("https://example.invalid/static.zip", "0" * 64)
+
+            self.assertFalse((downloads / "snowbreak-static-assets.zip.download").exists())
 
     def test_static_pack_current_when_url_and_hash_match_and_files_exist(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

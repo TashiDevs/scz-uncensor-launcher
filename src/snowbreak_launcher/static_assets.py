@@ -32,21 +32,25 @@ def download_static_zip(url: str, expected_sha256: str, progress: callable | Non
     temp = target.with_suffix(".zip.download")
     temp.unlink(missing_ok=True)
 
-    response = requests.get(url, stream=True, timeout=60)
-    response.raise_for_status()
-
     digest = hashlib.sha256()
-    total = int(response.headers.get("Content-Length") or 0)
     downloaded = 0
-    with temp.open("wb") as handle:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            if not chunk:
-                continue
-            handle.write(chunk)
-            digest.update(chunk)
-            downloaded += len(chunk)
-            if progress:
-                progress(downloaded, total)
+    try:
+        response = requests.get(url, stream=True, timeout=60)
+        response.raise_for_status()
+
+        total = int(response.headers.get("Content-Length") or 0)
+        with temp.open("wb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                handle.write(chunk)
+                digest.update(chunk)
+                downloaded += len(chunk)
+                if progress:
+                    progress(downloaded, total)
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
 
     actual = digest.hexdigest()
     if actual.lower() != expected_sha256.lower():

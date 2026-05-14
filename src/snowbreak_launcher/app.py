@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .config import append_log, install_to_state, load_env_file, load_state, log_path, save_state, state_to_install
+from .config import cleanup_app_data, append_log, install_to_state, load_env_file, load_state, log_path, save_state, state_to_install
 from .constants import APP_NAME, APP_VERSION, GITHUB_RELEASE_PAGE
 from .detection import auto_detect_install, resolve_manual_install, validate_ix_folder
 from .github_client import fetch_latest_release
@@ -239,6 +239,7 @@ class SnowbreakLauncherApp(QWidget):
     def __init__(self) -> None:
         super().__init__()
         load_env_file(Path.cwd())
+        cleanup_app_data()
 
         self.setWindowTitle(APP_NAME)
         self.setFixedSize(*WINDOW_SIZE)
@@ -310,11 +311,8 @@ class SnowbreakLauncherApp(QWidget):
         self.import_button.move(214, 544 - 30)
         self.import_button.clicked.connect(self._import_static_zip)
 
-        self.self_update_button = GlassButton("Update Launcher", self, width=132, height=30)
-        self.self_update_button.move(14, 544 - 30)
-        self.self_update_button.clicked.connect(self._start_launcher_self_update)
-
     def _render(self) -> None:
+        launcher_update_priority = self._launcher_update_has_priority()
         for name, (kind, text) in self._current_checklist().items():
             self.chips[name].set_status(text, kind)
 
@@ -326,7 +324,7 @@ class SnowbreakLauncherApp(QWidget):
             "disclaimer",
         }
         self._set_footer_visibility(installed=show_installed_controls, show_error_tools=self.ui_state == "error")
-        self.auto_update_pill.setVisible(show_installed_controls and self.ui_state == "ready_to_update")
+        self.auto_update_pill.setVisible(show_installed_controls and self.ui_state == "ready_to_update" and not launcher_update_priority)
         self.cancel_button.setVisible(self.ui_state in {"installing", "updating"})
 
         if self.ui_state == "disclaimer":
@@ -370,6 +368,11 @@ class SnowbreakLauncherApp(QWidget):
         elif self.ui_state == "error":
             self._set_top_state("Needs attention", "Something needs attention, but your setup was kept safe.", 0.0)
             self.main_button.setText("Try Again")
+            self.main_button.setEnabled(True)
+        if launcher_update_priority and self.launcher_update:
+            self._set_top_state("Launcher update ready", "A new launcher version is available.", 0.0)
+            self.status_label.setText(f"Launcher update available: {self.launcher_update.tag_name}")
+            self.main_button.setText("Update Launcher")
             self.main_button.setEnabled(True)
         self.update()
 
@@ -450,8 +453,6 @@ class SnowbreakLauncherApp(QWidget):
             x += 98
             self.import_button.move(x, 544 - 30)
             x += 108
-        self.self_update_button.setVisible(bool(self.launcher_update) and not self.busy and self.ui_state != "disclaimer")
-        self.self_update_button.move(x, 544 - 30)
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
         painter = QPainter(self)
@@ -506,6 +507,9 @@ class SnowbreakLauncherApp(QWidget):
         return f"by Tashi - v{APP_VERSION}"
 
     def _main_action(self) -> None:
+        if self._launcher_update_has_priority():
+            self._start_launcher_self_update()
+            return
         if self.ui_state == "disclaimer":
             self.state_data.accepted_notice = True
             self.state_data.disclaimer_accepted_at = datetime.now().isoformat(timespec="seconds")
@@ -521,6 +525,13 @@ class SnowbreakLauncherApp(QWidget):
             self.ui_state = "checking"
             self._render()
             self._start_checks()
+
+    def _launcher_update_has_priority(self) -> bool:
+        return bool(self.launcher_update) and not self.busy and self.ui_state in {
+            "ready_to_install",
+            "ready_to_update",
+            "ready_to_launch",
+        }
 
     def _cancel_action(self) -> None:
         if self.busy:
@@ -650,7 +661,7 @@ class SnowbreakLauncherApp(QWidget):
                         )
                     ),
                 )
-                prepare_self_update(update_path)
+                prepare_self_update(update_path, expected_sha256=self.launcher_update.asset_sha256)  # type: ignore[union-attr]
                 self._signals.self_update_started.emit("Launcher update is ready. Restarting...")
             except SelfUpdateError as exc:
                 append_log(f"Launcher self-update failed: {exc}")
@@ -763,6 +774,7 @@ class SnowbreakLauncherApp(QWidget):
         self.status_label.setText(_progress_status_text(event))
 
     def _setup_done(self, message: str) -> None:
+        cleanup_app_data()
         self.busy = False
         self.core_files_installed = True
         self.static_assets_installed = True
@@ -778,12 +790,14 @@ class SnowbreakLauncherApp(QWidget):
         self.close()
 
     def _cancelled(self, message: str) -> None:
+        cleanup_app_data()
         self.busy = False
         self.ui_state = "ready_to_update" if self.local_install_complete else "ready_to_install"
         self.status_label.setText("Cancelled. No partial download was installed.")
         self._render()
 
     def _show_error(self, message: str) -> None:
+        cleanup_app_data()
         self.busy = False
         self.ui_state = "error"
         self.status_label.setText(message)

@@ -98,21 +98,25 @@ def download_launcher_update(
     temp_path = target.with_suffix(".exe.download")
     temp_path.unlink(missing_ok=True)
 
-    client = session or requests.Session()
-    response = client.get(update.download_url, stream=True, timeout=60)
-    response.raise_for_status()
-
     digest = hashlib.sha256()
     downloaded = 0
-    with temp_path.open("wb") as handle:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            if not chunk:
-                continue
-            handle.write(chunk)
-            digest.update(chunk)
-            downloaded += len(chunk)
-            if progress:
-                progress(downloaded, update.asset_size)
+    try:
+        client = session or requests.Session()
+        response = client.get(update.download_url, stream=True, timeout=60)
+        response.raise_for_status()
+
+        with temp_path.open("wb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if not chunk:
+                    continue
+                handle.write(chunk)
+                digest.update(chunk)
+                downloaded += len(chunk)
+                if progress:
+                    progress(downloaded, update.asset_size)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
 
     actual = digest.hexdigest().lower()
     if actual != update.asset_sha256.lower():
@@ -126,6 +130,7 @@ def download_launcher_update(
 def prepare_self_update(
     downloaded_exe: Path,
     *,
+    expected_sha256: str | None = None,
     current_exe: Path | None = None,
     current_pid: int | None = None,
     popen: callable = subprocess.Popen,
@@ -151,6 +156,8 @@ def prepare_self_update(
         "--update-pid",
         str(current_pid or os.getpid()),
     ]
+    if expected_sha256:
+        command.extend(["--update-sha256", expected_sha256])
     popen(command, close_fds=True)
     append_log(f"Started launcher self-update helper for {downloaded_exe}")
     return updater_exe
@@ -160,6 +167,7 @@ def apply_self_update(
     source: Path,
     target: Path,
     *,
+    expected_sha256: str | None = None,
     old_pid: int | None = None,
     restart: bool = True,
     wait_seconds: float = 20.0,
@@ -169,10 +177,36 @@ def apply_self_update(
     if old_pid:
         _wait_for_process_exit(old_pid, deadline)
 
+    target_temp = target.with_name(target.name + ".new")
+    try:
+        target_temp.unlink(missing_ok=True)
+    except OSError:
+        pass
+
     last_error: Exception | None = None
+    try:
+        if expected_sha256 and _file_sha256(source).lower() != expected_sha256.lower():
+            _write_update_log("Downloaded launcher hash changed before replacement.")
+            _cleanup_file(source)
+            _cleanup_parent_if_empty(source)
+            return 1
+        shutil.copy2(source, target_temp)
+        if expected_sha256 and _file_sha256(target_temp).lower() != expected_sha256.lower():
+            _write_update_log("Copied launcher update hash did not match.")
+            _cleanup_file(target_temp)
+            _cleanup_file(source)
+            _cleanup_parent_if_empty(source)
+            return 1
+    except OSError as exc:
+        _write_update_log(f"Failed to prepare launcher replacement: {exc}")
+        _cleanup_file(target_temp)
+        _cleanup_file(source)
+        _cleanup_parent_if_empty(source)
+        return 1
+
     while time.monotonic() < deadline:
         try:
-            os.replace(source, target)
+            os.replace(target_temp, target)
             last_error = None
             break
         except OSError as exc:
@@ -180,7 +214,14 @@ def apply_self_update(
             time.sleep(0.35)
     if last_error is not None:
         _write_update_log(f"Failed to replace launcher: {last_error}")
+        _cleanup_file(target_temp)
+        _cleanup_file(source)
+        _cleanup_parent_if_empty(source)
         return 1
+
+    _cleanup_file(source)
+    _cleanup_parent_if_empty(source)
+    _cleanup_updater_dir()
 
     if restart:
         try:
@@ -197,12 +238,19 @@ def apply_self_update_from_args(argv: list[str]) -> int:
     parser.add_argument("--update-source")
     parser.add_argument("--update-target")
     parser.add_argument("--update-pid")
+    parser.add_argument("--update-sha256")
     args, _ = parser.parse_known_args(argv)
     if not args.apply_update or not args.update_source or not args.update_target:
         _write_update_log("Updater mode was called without source and target paths.")
         return 2
     old_pid = _parse_pid(args.update_pid)
-    return apply_self_update(Path(args.update_source), Path(args.update_target), old_pid=old_pid, restart=True)
+    return apply_self_update(
+        Path(args.update_source),
+        Path(args.update_target),
+        expected_sha256=args.update_sha256,
+        old_pid=old_pid,
+        restart=True,
+    )
 
 
 def _find_launcher_asset(data: dict) -> dict:
@@ -281,3 +329,38 @@ def _write_update_log(message: str) -> None:
         path.write_text(message + "\n", encoding="utf-8")
     except OSError:
         pass
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _cleanup_file(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _cleanup_parent_if_empty(path: Path) -> None:
+    parent = path.parent
+    for _ in range(4):
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+        if parent.name.lower() == "downloads":
+            break
+        parent = parent.parent
+
+
+def _cleanup_updater_dir() -> None:
+    try:
+        shutil.rmtree(app_data_dir() / "updater")
+    except OSError:
+        pass
+

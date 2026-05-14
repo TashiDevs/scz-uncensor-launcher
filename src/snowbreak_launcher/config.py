@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 
 from .constants import APP_DATA_DIR_NAME
 from .models import InstallInfo, LauncherState
+
+
+KEEP_APP_DATA_FILES = {"state.json", "launcher.log", "self-update.log"}
 
 
 def app_data_dir() -> Path:
@@ -44,6 +48,26 @@ def downloads_dir() -> Path:
     path = app_data_dir() / "downloads"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def cleanup_app_data() -> list[Path]:
+    """Remove cached downloads while keeping only settings and logs."""
+    root = app_data_dir()
+    removed: list[Path] = []
+    for item in root.iterdir():
+        if item.is_file() and item.name in KEEP_APP_DATA_FILES:
+            continue
+        try:
+            if item.is_dir() and not item.is_symlink():
+                shutil.rmtree(item)
+            else:
+                item.unlink(missing_ok=True)
+            removed.append(item)
+        except OSError:
+            # A running updater helper can stay locked briefly; the next startup
+            # will try again.
+            continue
+    return removed
 
 
 def load_state() -> LauncherState:

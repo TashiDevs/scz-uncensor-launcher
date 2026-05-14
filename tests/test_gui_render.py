@@ -57,7 +57,10 @@ class GuiRenderTests(unittest.TestCase):
                 localization_path=localization,
             )
 
-            with patch("snowbreak_launcher.app.load_state", return_value=LauncherState()):
+            with (
+                patch("snowbreak_launcher.app.load_state", return_value=LauncherState()),
+                patch("snowbreak_launcher.app.cleanup_app_data"),
+            ):
                 qt_app = create_application([])
                 app = SnowbreakLauncherApp()
             try:
@@ -95,7 +98,10 @@ class GuiRenderTests(unittest.TestCase):
                 installed_files={"core.pak": "hash"},
             )
 
-            with patch("snowbreak_launcher.app.load_state", return_value=state):
+            with (
+                patch("snowbreak_launcher.app.load_state", return_value=state),
+                patch("snowbreak_launcher.app.cleanup_app_data"),
+            ):
                 qt_app = create_application([])
                 app = SnowbreakLauncherApp()
             try:
@@ -119,7 +125,10 @@ class GuiRenderTests(unittest.TestCase):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
 
-        with patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)):
+        with (
+            patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+            patch("snowbreak_launcher.app.cleanup_app_data"),
+        ):
             qt_app = create_application([])
             app = SnowbreakLauncherApp()
         try:
@@ -148,7 +157,10 @@ class GuiRenderTests(unittest.TestCase):
                 installed_files={"core.pak": _sha("core")},
             )
 
-            with patch("snowbreak_launcher.app.load_state", return_value=state):
+            with (
+                patch("snowbreak_launcher.app.load_state", return_value=state),
+                patch("snowbreak_launcher.app.cleanup_app_data"),
+            ):
                 qt_app = create_application([])
                 app = SnowbreakLauncherApp()
             try:
@@ -172,7 +184,10 @@ class GuiRenderTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             install = self._make_install(temp)
-            with patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)):
+            with (
+                patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+                patch("snowbreak_launcher.app.cleanup_app_data"),
+            ):
                 qt_app = create_application([])
                 app = SnowbreakLauncherApp()
             try:
@@ -194,16 +209,19 @@ class GuiRenderTests(unittest.TestCase):
             with patch.object(launcher_app.sys, "_MEIPASS", temp, create=True):
                 self.assertEqual(launcher_app._asset_path("images", "background.png"), Path(temp) / "assets" / "images" / "background.png")
 
-    def test_footer_includes_app_version_and_launcher_update_button(self) -> None:
+    def test_launcher_update_uses_main_button_and_no_footer_button(self) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
 
-        with patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)):
+        with (
+            patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+            patch("snowbreak_launcher.app.cleanup_app_data"),
+        ):
             qt_app = create_application([])
             app = SnowbreakLauncherApp()
         try:
             app.launcher_update = LauncherUpdateInfo(
-                tag_name="v1.04",
+                tag_name="v1.06",
                 html_url="https://example.invalid/release",
                 asset_name="SnowbreakUncensorLauncher.exe",
                 asset_size=123,
@@ -214,8 +232,42 @@ class GuiRenderTests(unittest.TestCase):
             app._render()
             qt_app.processEvents()
 
-            self.assertEqual(app._watermark_text(), "by Tashi - v1.04")
-            self.assertFalse(app.self_update_button.isHidden())
+            self.assertEqual(app._watermark_text(), "by Tashi - v1.05")
+            self.assertEqual(app.top_title, "Launcher update ready")
+            self.assertEqual(app.main_button.text(), "Update Launcher")
+            self.assertEqual(app.status_label._text, "Launcher update available: v1.06")
+            self.assertFalse(hasattr(app, "self_update_button"))
+        finally:
+            app.close()
+            app.deleteLater()
+
+    def test_main_action_starts_launcher_update_when_available(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with (
+            patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+            patch("snowbreak_launcher.app.cleanup_app_data"),
+        ):
+            qt_app = create_application([])
+            app = SnowbreakLauncherApp()
+        try:
+            app.launcher_update = LauncherUpdateInfo(
+                tag_name="v1.06",
+                html_url="https://example.invalid/release",
+                asset_name="SnowbreakUncensorLauncher.exe",
+                asset_size=123,
+                asset_sha256="a" * 64,
+                download_url="https://example.invalid/SnowbreakUncensorLauncher.exe",
+            )
+            app.ui_state = "ready_to_launch"
+            app._render()
+            qt_app.processEvents()
+
+            with patch.object(app, "_start_launcher_self_update") as start_self_update:
+                app._main_action()
+
+            start_self_update.assert_called_once()
         finally:
             app.close()
             app.deleteLater()

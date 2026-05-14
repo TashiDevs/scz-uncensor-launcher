@@ -95,6 +95,7 @@ class InstallerTests(unittest.TestCase):
             )
 
             def fake_download_asset(asset: GitHubAsset, destination: Path, *args, **kwargs) -> None:
+                destination.parent.mkdir(parents=True, exist_ok=True)
                 destination.write_text("core", encoding="utf-8")
 
             with (
@@ -192,6 +193,64 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual((install.ix_folder / "core-c.pak").read_text(encoding="utf-8"), "core-c-new")
             self.assertFalse((install.ix_folder / "removed-core.pak").exists())
             self.assertEqual(set(updated.installed_files), {"core-a.pak", "core-b.pak", "core-c.pak"})
+
+    def test_setup_update_removes_github_staging_after_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            install = self._install(root)
+            install.paks_root.mkdir(parents=True)
+            install.localization_path.parent.mkdir(parents=True)
+            install.localization_path.write_text("localization = 1\n", encoding="utf-8")
+            install.ix_folder.mkdir(parents=True)
+            staging = root / "staging"
+            release = GitHubRelease(
+                tag_name="AntiAmend-new",
+                html_url="https://example.invalid",
+                assets=(GitHubAsset("core.pak", 4, self._sha("core"), "https://example.invalid/core.pak"),),
+            )
+
+            def fake_download_asset(asset: GitHubAsset, destination: Path, *args, **kwargs) -> None:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text("core", encoding="utf-8")
+
+            with (
+                patch("snowbreak_launcher.installer.fetch_latest_release", return_value=release),
+                patch("snowbreak_launcher.installer._fresh_staging_dir", return_value=staging),
+                patch("snowbreak_launcher.installer.download_asset", side_effect=fake_download_asset),
+                patch("snowbreak_launcher.installer.save_state"),
+            ):
+                setup_or_update(install, LauncherState(), install_static_pack=False)
+
+            self.assertFalse(staging.exists())
+
+    def test_setup_update_removes_static_zip_after_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            install = self._install(root)
+            install.paks_root.mkdir(parents=True)
+            install.localization_path.parent.mkdir(parents=True)
+            install.localization_path.write_text("localization = 1\n", encoding="utf-8")
+            install.ix_folder.mkdir(parents=True)
+            zip_path = root / "downloads" / "snowbreak-static-assets.zip"
+            zip_path.parent.mkdir()
+            zip_path.write_text("zip", encoding="utf-8")
+            release = GitHubRelease("AntiAmend-new", "https://example.invalid", assets=())
+
+            def fake_import_static_zip(path: Path, ix_folder: Path) -> list[str]:
+                for name in STATIC_ASSET_NAMES:
+                    (ix_folder / name).write_text(name, encoding="utf-8")
+                return sorted(STATIC_ASSET_NAMES)
+
+            with (
+                patch("snowbreak_launcher.installer.fetch_latest_release", return_value=release),
+                patch("snowbreak_launcher.installer.configured_static_download", return_value=("https://example.invalid/static.zip", "static-hash")),
+                patch("snowbreak_launcher.installer.download_static_zip", return_value=zip_path),
+                patch("snowbreak_launcher.installer.import_static_zip", side_effect=fake_import_static_zip),
+                patch("snowbreak_launcher.installer.save_state"),
+            ):
+                setup_or_update(install, LauncherState())
+
+            self.assertFalse(zip_path.exists())
 
 
 if __name__ == "__main__":

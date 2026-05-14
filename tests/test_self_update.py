@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,7 +76,13 @@ class SelfUpdateTests(unittest.TestCase):
                 patch("snowbreak_launcher.self_update.app_data_dir", return_value=root / "appdata"),
                 patch("snowbreak_launcher.self_update.append_log"),
             ):
-                updater = prepare_self_update(downloaded, current_exe=current, current_pid=1234, popen=fake_popen)
+                updater = prepare_self_update(
+                    downloaded,
+                    expected_sha256="a" * 64,
+                    current_exe=current,
+                    current_pid=1234,
+                    popen=fake_popen,
+                )
 
             self.assertTrue(updater.is_file())
             self.assertEqual(updater.read_text(encoding="utf-8"), "current")
@@ -83,6 +90,8 @@ class SelfUpdateTests(unittest.TestCase):
             self.assertIn(str(downloaded), commands[0])
             self.assertIn(str(current), commands[0])
             self.assertIn("1234", commands[0])
+            self.assertIn("--update-sha256", commands[0])
+            self.assertIn("a" * 64, commands[0])
 
     def test_apply_self_update_replaces_target_without_restart(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -92,11 +101,62 @@ class SelfUpdateTests(unittest.TestCase):
             source.write_text("new", encoding="utf-8")
             target.write_text("old", encoding="utf-8")
 
-            result = apply_self_update(source, target, restart=False)
+            with patch("snowbreak_launcher.self_update.app_data_dir", return_value=root / "appdata"):
+                result = apply_self_update(source, target, restart=False)
 
             self.assertEqual(result, 0)
             self.assertEqual(target.read_text(encoding="utf-8"), "new")
             self.assertFalse(source.exists())
+
+    def test_apply_self_update_uses_target_sibling_temp_before_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "downloads" / "new.exe"
+            target = root / "different-folder" / "SnowbreakUncensorLauncher.exe"
+            source.parent.mkdir(parents=True)
+            target.parent.mkdir(parents=True)
+            source.write_text("new", encoding="utf-8")
+            target.write_text("old", encoding="utf-8")
+            expected_hash = hashlib.sha256(b"new").hexdigest()
+            calls: list[tuple[Path, Path]] = []
+
+            def fake_replace(src: Path, dst: Path) -> None:
+                calls.append((Path(src), Path(dst)))
+                Path(dst).write_bytes(Path(src).read_bytes())
+                Path(src).unlink()
+
+            with (
+                patch("snowbreak_launcher.self_update.os.replace", side_effect=fake_replace),
+                patch("snowbreak_launcher.self_update.app_data_dir", return_value=root / "appdata"),
+            ):
+                result = apply_self_update(source, target, expected_sha256=expected_hash, restart=False)
+
+            self.assertEqual(result, 0)
+            self.assertEqual(calls, [(target.with_name(target.name + ".new"), target)])
+            self.assertEqual(target.read_text(encoding="utf-8"), "new")
+            self.assertFalse(source.exists())
+
+    def test_apply_self_update_cleans_download_and_updater_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            appdata = root / "appdata"
+            source = appdata / "downloads" / "launcher-updates" / "v1.05" / "SnowbreakUncensorLauncher.exe"
+            target = root / "launcher" / "SnowbreakUncensorLauncher.exe"
+            updater = appdata / "updater"
+            source.parent.mkdir(parents=True)
+            target.parent.mkdir(parents=True)
+            updater.mkdir(parents=True)
+            source.write_text("new", encoding="utf-8")
+            target.write_text("old", encoding="utf-8")
+            (updater / "SnowbreakLauncherUpdater.exe").write_text("helper", encoding="utf-8")
+
+            with patch("snowbreak_launcher.self_update.app_data_dir", return_value=appdata):
+                result = apply_self_update(source, target, restart=False)
+
+            self.assertEqual(result, 0)
+            self.assertEqual(target.read_text(encoding="utf-8"), "new")
+            self.assertFalse((appdata / "downloads").exists())
+            self.assertFalse(updater.exists())
 
 
 if __name__ == "__main__":
