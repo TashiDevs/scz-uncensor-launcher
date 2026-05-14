@@ -22,7 +22,7 @@ def decide_next_state(
     static_assets_installed: bool,
 ) -> UpdateDecision:
     if install is None:
-        return UpdateDecision("ready_to_install", "Install", "Choose Snowbreak folder.")
+        return UpdateDecision("ready_to_install", "Choose Folder", "Choose Snowbreak folder.")
 
     if not state.installed_release:
         return UpdateDecision("ready_to_install", "Install", "Ready to install.")

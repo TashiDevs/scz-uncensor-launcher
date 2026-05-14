@@ -9,7 +9,8 @@ from .constants import MANAGED_FOLDER_NAME, OLD_BUILD_CUTOFF_ISO, PAKS_RELATIVE_
 from .models import InstallInfo
 
 SEASUN_STANDALONE_REGISTRY_KEY = r"SOFTWARE\SeasunGameSnowBreakOs\InstalledGamePath"
-SEASUN_STANDALONE_REGISTRY_VALUE = "snowbreak"
+SEASUN_STANDALONE_REGISTRY_FALLBACK_KEY = r"SOFTWARE\SeasunGameSnowBreakOs\InstPath"
+SEASUN_STANDALONE_REGISTRY_VALUES = ("snowbreak", "InstPath", "")
 SEASUN_BASE_FOLDER_NAME = "SeasunSnowBreakOs"
 SEASUN_NESTED_GAME_PARTS = ("Game", "snowbreak")
 
@@ -155,9 +156,13 @@ def _root_from_paks(paks_root: Path) -> Path | None:
 
 
 def _find_paks_root(game_root: Path) -> Path | None:
-    for game_name in ("Game", "game"):
-        candidate = game_root / game_name / "Content" / "Paks"
-        if candidate.exists():
+    for parts in (
+        ("Game", "Content", "Paks"),
+        ("game", "Content", "Paks"),
+        ("game", "Game", "Content", "Paks"),
+    ):
+        candidate = _existing_relative_path(game_root, parts)
+        if candidate:
             return candidate
     return None
 
@@ -167,6 +172,7 @@ def _choose_standalone_localization(game_root: Path) -> Path:
         game_root / "localization.txt",
         game_root / "Game" / "cbjq" / "localization.txt",
         game_root / "game" / "cbjq" / "localization.txt",
+        game_root / "game" / "Game" / "cbjq" / "localization.txt",
         game_root / "cbjq" / "localization.txt",
     ]
     for candidate in candidates:
@@ -208,6 +214,11 @@ def _standalone_launcher_search_roots(game_root: Path) -> list[Path]:
         roots.append(game_root.parent)
         if game_root.parent.name.lower() == "game":
             roots.append(game_root.parent.parent)
+    if game_root.name.lower() == "game" and game_root.parent.name.lower() == "snowbreak":
+        roots.append(game_root.parent)
+        roots.append(game_root.parent.parent)
+        if game_root.parent.parent.name.lower() == "game":
+            roots.append(game_root.parent.parent.parent)
     return _unique_paths([root for root in roots if root.exists()])
 
 
@@ -231,6 +242,7 @@ def _collect_warnings(
         game_root / "version.cfg",
         game_root / "Game" / "manifest.json",
         game_root / "game" / "manifest.json",
+        game_root / "game" / "Game" / "manifest.json",
     ]
     for candidate in dated_files:
         if candidate.exists():
@@ -335,6 +347,8 @@ def _standalone_game_root_candidates(path: Path) -> list[Path]:
         candidates.append(path.joinpath(*SEASUN_NESTED_GAME_PARTS))
     if path.name.lower() == "game" and path.parent.name.lower() == SEASUN_BASE_FOLDER_NAME.lower():
         candidates.append(path / "snowbreak")
+    if path.name.lower() == "snowbreak":
+        candidates.append(path / "game")
     return candidates
 
 
@@ -354,18 +368,20 @@ def _seasun_standalone_registry_locations() -> list[Path]:
 
     locations: list[Path] = []
     for access_flag in access_flags:
-        try:
-            with winreg.OpenKey(
-                winreg.HKEY_LOCAL_MACHINE,
-                SEASUN_STANDALONE_REGISTRY_KEY,
-                0,
-                winreg.KEY_READ | access_flag,
-            ) as key:
-                path = _registry_path_value(_query_registry_string(winreg, key, SEASUN_STANDALONE_REGISTRY_VALUE))
-                if path:
-                    locations.append(path)
-        except OSError:
-            continue
+        for subkey in (SEASUN_STANDALONE_REGISTRY_KEY, SEASUN_STANDALONE_REGISTRY_FALLBACK_KEY):
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    subkey,
+                    0,
+                    winreg.KEY_READ | access_flag,
+                ) as key:
+                    for value_name in SEASUN_STANDALONE_REGISTRY_VALUES:
+                        path = _registry_path_value(_query_registry_string(winreg, key, value_name))
+                        if path:
+                            locations.append(path)
+            except OSError:
+                continue
     return _unique_paths(locations)
 
 
@@ -416,6 +432,25 @@ def _registry_path_value(value: str) -> Path | None:
     if not text:
         return None
     return Path(text)
+
+
+def _existing_relative_path(root: Path, parts: tuple[str, ...]) -> Path | None:
+    current = root
+    for part in parts:
+        candidate = current / part
+        if candidate.exists():
+            current = candidate
+            continue
+        if not current.exists() or not current.is_dir():
+            return None
+        try:
+            match = next((child for child in current.iterdir() if child.name.lower() == part.lower()), None)
+        except OSError:
+            return None
+        if match is None:
+            return None
+        current = match
+    return current if current.exists() else None
 
 
 def _parse_vdf_value(text: str, key: str) -> str | None:

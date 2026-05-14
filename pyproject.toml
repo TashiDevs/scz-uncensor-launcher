@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "snowbreak-uncensor-launcher"
-version = "1.03"
+version = "1.04"
 description = "Local Windows launcher for Snowbreak uncensor pak setup"
 readme = "README.md"
 requires-python = ">=3.10"

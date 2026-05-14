@@ -26,7 +26,7 @@ class UpdateLogicTests(unittest.TestCase):
     def test_first_install_when_no_install_detected(self) -> None:
         decision = decide_next_state(LauncherState(), None, None, False, False)
         self.assertEqual(decision.ui_state, "ready_to_install")
-        self.assertEqual(decision.action_label, "Install")
+        self.assertEqual(decision.action_label, "Choose Folder")
 
     def test_installed_current_ready_to_launch(self) -> None:
         state = LauncherState(installed_release="AntiAmend-current")

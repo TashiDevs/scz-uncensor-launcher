@@ -115,6 +115,24 @@ class GuiRenderTests(unittest.TestCase):
                 app.close()
                 app.deleteLater()
 
+    def test_missing_game_renders_choose_folder_button(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)):
+            qt_app = create_application([])
+            app = SnowbreakLauncherApp()
+        try:
+            app._finish_checks(None, None)
+            qt_app.processEvents()
+
+            self.assertEqual(app.ui_state, "ready_to_install")
+            self.assertEqual(app.top_title, "Game needed")
+            self.assertEqual(app.main_button.text(), "Choose Folder")
+        finally:
+            app.close()
+            app.deleteLater()
+
     def test_complete_install_with_new_release_renders_as_update(self) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
@@ -196,7 +214,7 @@ class GuiRenderTests(unittest.TestCase):
             app._render()
             qt_app.processEvents()
 
-            self.assertEqual(app._watermark_text(), "by Tashi - v1.03")
+            self.assertEqual(app._watermark_text(), "by Tashi - v1.04")
             self.assertFalse(app.self_update_button.isHidden())
         finally:
             app.close()

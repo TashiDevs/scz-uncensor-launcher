@@ -344,7 +344,7 @@ class SnowbreakLauncherApp(QWidget):
             title = "Game needed" if self.install is None else "Setup needed"
             self._set_top_state(title, reason, 0.0)
             self.status_label.setText(_short_status_text(reason))
-            self.main_button.setText("Install")
+            self.main_button.setText("Choose Folder" if self.install is None else "Install")
             self.main_button.setEnabled(True)
         elif self.ui_state == "ready_to_update":
             reason = self.decision.reason if self.decision else "Ready to update."
