@@ -4,6 +4,10 @@ A small Windows launcher for installing and updating Snowbreak: Containment Zone
 
 It detects your Snowbreak install, sets the hidden localization switch, manages the `Game\Content\Paks\~ix` mod folder, downloads the current uncensor files, and can launch the game afterward.
 
+Uses
+https://github.com/ahalpha/Snowbreak-AnitAmend
+as the base.
+
 ## Download
 
 Download the latest `SnowbreakUncensorLauncher.exe` from the GitHub Releases page and run it.
