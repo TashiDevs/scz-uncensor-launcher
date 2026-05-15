@@ -10,24 +10,33 @@ import tests.context  # noqa: F401
 from snowbreak_launcher.self_update import (
     SelfUpdateError,
     apply_self_update,
+    download_launcher_update,
     is_newer_version,
+    LauncherUpdateInfo,
     parse_launcher_release,
     prepare_self_update,
 )
 
 
 class SelfUpdateTests(unittest.TestCase):
-    def _release(self, tag: str, *, digest: str = "", body: str = "") -> dict:
+    def _release(
+        self,
+        tag: str,
+        *,
+        digest: str = "",
+        body: str = "",
+        asset_name: str = "SnowbreakUncensorLauncher.exe",
+    ) -> dict:
         return {
             "tag_name": tag,
             "html_url": "https://example.invalid/release",
             "body": body,
             "assets": [
                 {
-                    "name": "SnowbreakUncensorLauncher.exe",
+                    "name": asset_name,
                     "size": 123,
                     "digest": f"sha256:{digest}" if digest else "",
-                    "browser_download_url": "https://example.invalid/SnowbreakUncensorLauncher.exe",
+                    "browser_download_url": f"https://example.invalid/{asset_name}",
                 }
             ],
         }
@@ -46,6 +55,16 @@ class SelfUpdateTests(unittest.TestCase):
         self.assertEqual(update.asset_sha256, sha)
         self.assertEqual(update.asset_name, "SnowbreakUncensorLauncher.exe")
 
+    def test_parse_release_accepts_prefixed_launcher_exe(self) -> None:
+        sha = "c" * 64
+        update = parse_launcher_release(
+            self._release("v1.04", digest=sha, asset_name="SnowbreakUncensorLauncher-v1.04.exe"),
+            current_version="1.03",
+        )
+
+        self.assertIsNotNone(update)
+        self.assertEqual(update.asset_name, "SnowbreakUncensorLauncher-v1.04.exe")
+
     def test_parse_release_uses_body_hash(self) -> None:
         sha = "b" * 64
         update = parse_launcher_release(self._release("v1.04", body=f"SHA-256:\n{sha}"), current_version="1.03")
@@ -59,6 +78,11 @@ class SelfUpdateTests(unittest.TestCase):
     def test_parse_release_requires_hash_for_newer_release(self) -> None:
         with self.assertRaises(SelfUpdateError):
             parse_launcher_release(self._release("v1.04"), current_version="1.03")
+
+    def test_parse_release_rejects_unrelated_exe_asset(self) -> None:
+        sha = "d" * 64
+        with self.assertRaises(SelfUpdateError):
+            parse_launcher_release(self._release("v1.04", digest=sha, asset_name="OtherLauncher.exe"), current_version="1.03")
 
     def test_prepare_self_update_copies_current_exe_and_starts_helper_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -157,6 +181,48 @@ class SelfUpdateTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "new")
             self.assertFalse((appdata / "downloads").exists())
             self.assertFalse(updater.exists())
+
+    def test_download_launcher_update_resumes_existing_partial_download(self) -> None:
+        class FakeResponse:
+            status_code = 206
+            headers = {"Content-Length": "3"}
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_content(self, chunk_size: int):
+                yield b"llo"
+
+        class FakeSession:
+            def __init__(self) -> None:
+                self.headers: dict | None = None
+
+            def get(self, url: str, **kwargs):
+                self.headers = kwargs.get("headers")
+                return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target_dir = root / "downloads" / "launcher-updates" / "v1.06"
+            target_dir.mkdir(parents=True)
+            partial = target_dir / "SnowbreakUncensorLauncher.exe.download"
+            partial.write_bytes(b"he")
+            session = FakeSession()
+            update = LauncherUpdateInfo(
+                tag_name="v1.06",
+                html_url="https://example.invalid/release",
+                asset_name="SnowbreakUncensorLauncher.exe",
+                asset_size=5,
+                asset_sha256=hashlib.sha256(b"hello").hexdigest(),
+                download_url="https://example.invalid/SnowbreakUncensorLauncher.exe",
+            )
+
+            with patch("snowbreak_launcher.self_update.downloads_dir", return_value=root / "downloads"):
+                path = download_launcher_update(update, session=session)
+
+            self.assertEqual(session.headers, {"Range": "bytes=2-"})
+            self.assertEqual(path.read_bytes(), b"hello")
+            self.assertFalse(partial.exists())
 
 
 if __name__ == "__main__":

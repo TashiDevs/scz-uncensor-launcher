@@ -76,6 +76,7 @@ class GuiRenderTests(unittest.TestCase):
                     "ready_to_update",
                     "installing",
                     "updating",
+                    "admin_needed",
                     "ready_to_launch",
                     "error",
                 ):
@@ -85,6 +86,102 @@ class GuiRenderTests(unittest.TestCase):
             finally:
                 app.close()
                 app.deleteLater()
+
+    def test_admin_needed_state_shows_cancel_and_grant_admin(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with (
+            patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+            patch("snowbreak_launcher.app.cleanup_app_data"),
+        ):
+            qt_app = create_application([])
+            app = SnowbreakLauncherApp()
+        try:
+            app._show_admin_needed("Snowbreak is in a protected folder.")
+            qt_app.processEvents()
+
+            self.assertEqual(app.ui_state, "admin_needed")
+            self.assertEqual(app.top_title, "Admin needed")
+            self.assertEqual(app.main_button.text(), "Cancel")
+            self.assertEqual(app.status_label._text, "Move the game install, or grant admin for this patch.")
+            self.assertFalse(app.grant_admin_button.isHidden())
+        finally:
+            app.close()
+            app.deleteLater()
+
+    def test_retryable_error_uses_retry_button_and_repeats_setup_action(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with (
+            patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+            patch("snowbreak_launcher.app.cleanup_app_data"),
+        ):
+            qt_app = create_application([])
+            app = SnowbreakLauncherApp()
+        try:
+            app._last_action = "setup"
+            app._show_error("Download failed. Check your connection and retry.", kind="network_retry")
+            qt_app.processEvents()
+
+            self.assertEqual(app.ui_state, "error")
+            self.assertEqual(app.main_button.text(), "Retry")
+            self.assertEqual(app.status_label._text, "Download failed. Check your connection and retry.")
+            with patch.object(app, "_start_setup_or_update") as start_setup:
+                app._main_action()
+            start_setup.assert_called_once()
+        finally:
+            app.close()
+            app.deleteLater()
+
+    def test_start_setup_shows_admin_needed_for_protected_install(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with tempfile.TemporaryDirectory() as temp:
+            install = self._make_install(temp)
+            with (
+                patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+                patch("snowbreak_launcher.app.cleanup_app_data"),
+            ):
+                qt_app = create_application([])
+                app = SnowbreakLauncherApp()
+            try:
+                app.install = install
+                with (
+                    patch("snowbreak_launcher.app.install_requires_admin", return_value=True),
+                    patch.object(app, "_run_worker") as run_worker,
+                ):
+                    app._start_setup_or_update()
+
+                self.assertEqual(app.ui_state, "admin_needed")
+                self.assertEqual(app.main_button.text(), "Cancel")
+                run_worker.assert_not_called()
+            finally:
+                app.close()
+                app.deleteLater()
+
+    def test_cancel_button_uses_short_status_text(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with (
+            patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+            patch("snowbreak_launcher.app.cleanup_app_data"),
+        ):
+            qt_app = create_application([])
+            app = SnowbreakLauncherApp()
+        try:
+            app.busy = True
+            app._cancel_action()
+            qt_app.processEvents()
+
+            self.assertTrue(app.cancel_requested)
+            self.assertEqual(app.status_label._text, "Cancelling...")
+        finally:
+            app.close()
+            app.deleteLater()
 
     def test_incomplete_saved_install_renders_as_install(self) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -232,7 +329,7 @@ class GuiRenderTests(unittest.TestCase):
             app._render()
             qt_app.processEvents()
 
-            self.assertEqual(app._watermark_text(), "by Tashi - v1.05")
+            self.assertEqual(app._watermark_text(), "by Tashi - v1.06")
             self.assertEqual(app.top_title, "Launcher update ready")
             self.assertEqual(app.main_button.text(), "Update Launcher")
             self.assertEqual(app.status_label._text, "Launcher update available: v1.06")
@@ -240,6 +337,21 @@ class GuiRenderTests(unittest.TestCase):
         finally:
             app.close()
             app.deleteLater()
+
+    def test_auto_update_pill_uses_short_centered_label(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import AutoUpdatePill, create_application
+        from PySide6.QtCore import Qt
+
+        qt_app = create_application([])
+        pill = AutoUpdatePill()
+        try:
+            qt_app.processEvents()
+
+            self.assertEqual(pill.label_text, "Auto-update next time?")
+            self.assertTrue(pill.label_alignment & Qt.AlignmentFlag.AlignHCenter)
+        finally:
+            pill.deleteLater()
 
     def test_main_action_starts_launcher_update_when_available(self) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

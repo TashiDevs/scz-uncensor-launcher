@@ -69,7 +69,12 @@ def setup_or_update(
             if staging is None:
                 raise RuntimeError("Download staging folder was not prepared.")
             reporter.step("Download", f"Downloading {asset.name}...", step, total_steps, current_file=asset.name)
-            download_asset(asset, staging / asset.name, progress=_download_progress(reporter, step, total_steps))
+            download_asset(
+                asset,
+                staging / asset.name,
+                progress=_download_progress(reporter, step, total_steps),
+                cancel_check=cancel_check,
+            )
             step += 1
 
         current_asset_names = {asset.name for asset in release.assets}
@@ -116,6 +121,7 @@ def setup_or_update(
                 url,
                 expected_hash,
                 progress=_static_download_progress(reporter, step, total_steps),
+                cancel_check=cancel_check,
             )
             step += 1
 

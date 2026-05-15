@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from pathlib import Path
 
 import requests
 
 from .constants import GITHUB_RELEASE_API
+from .download_utils import download_with_resume
 from .models import GitHubAsset, GitHubRelease
 
 
@@ -39,6 +39,7 @@ def parse_release(data: dict) -> GitHubRelease:
         name = str(raw_asset.get("name") or "")
         if not name.lower().endswith(".pak"):
             continue
+        _validate_asset_basename(name)
         digest = str(raw_asset.get("digest") or "")
         sha256 = ""
         if digest.startswith("sha256:"):
@@ -64,39 +65,29 @@ def parse_release(data: dict) -> GitHubRelease:
     return GitHubRelease(tag_name=tag_name, html_url=html_url, assets=tuple(assets))
 
 
+def _validate_asset_basename(name: str) -> None:
+    path = Path(name)
+    if path.name != name or path.is_absolute() or ".." in path.parts or "/" in name or "\\" in name:
+        raise ReleaseError(f"Unsafe GitHub asset name: {name}")
+
+
 def download_asset(
     asset: GitHubAsset,
     destination: Path,
     session: requests.Session | None = None,
     progress: callable | None = None,
+    cancel_check: callable | None = None,
 ) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = destination.with_suffix(destination.suffix + ".download")
-    if temp_path.exists():
-        temp_path.unlink()
-
-    client = session or requests.Session()
-    response = client.get(asset.download_url, stream=True, timeout=60)
-    response.raise_for_status()
-
-    digest = hashlib.sha256()
-    downloaded = 0
-    with temp_path.open("wb") as handle:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):
-            if not chunk:
-                continue
-            handle.write(chunk)
-            digest.update(chunk)
-            downloaded += len(chunk)
-            if progress:
-                progress(asset.name, downloaded, asset.size)
-
-    actual = digest.hexdigest()
-    if actual.lower() != asset.sha256.lower():
-        temp_path.unlink(missing_ok=True)
-        raise ReleaseError(f"SHA-256 mismatch for {asset.name}. Download was not installed.")
-
-    os.replace(temp_path, destination)
+    download_with_resume(
+        asset.download_url,
+        destination,
+        asset.sha256,
+        expected_size=asset.size,
+        session=session,
+        progress=(lambda downloaded, total: progress(asset.name, downloaded, total)) if progress else None,
+        cancel_check=cancel_check,
+        hash_error=ReleaseError(f"SHA-256 mismatch for {asset.name}. Download was not installed."),
+    )
 
 
 def file_sha256(path: Path) -> str:

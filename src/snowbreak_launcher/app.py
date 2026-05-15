@@ -19,11 +19,13 @@ from PySide6.QtWidgets import (
 from .config import cleanup_app_data, append_log, install_to_state, load_env_file, load_state, log_path, save_state, state_to_install
 from .constants import APP_NAME, APP_VERSION, GITHUB_RELEASE_PAGE
 from .detection import auto_detect_install, resolve_manual_install, validate_ix_folder
+from .download_utils import is_retryable_download_exception
 from .github_client import fetch_latest_release
 from .installer import setup_or_update, static_asset_status, uncensor_file_status, uninstall_all_managed_files
 from .launcher import launch_game
 from .localization import is_localization_enabled
 from .models import GitHubRelease, InstallInfo, LauncherState
+from .permissions import install_requires_admin, relaunch_as_admin
 from .progress import OperationCancelled, ProgressEvent
 from .self_update import (
     LauncherUpdateInfo,
@@ -184,6 +186,8 @@ class GlassLabel(QWidget):
 
 class AutoUpdatePill(QWidget):
     toggled = Signal(bool)
+    label_text = "Auto-update next time?"
+    label_alignment = Qt.AlignmentFlag.AlignCenter
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -223,7 +227,7 @@ class AutoUpdatePill(QWidget):
 
         painter.setFont(QFont("Segoe UI", 9))
         painter.setPen(QColor(235, 251, 255))
-        painter.drawText(QRectF(40, 0, self.width() - 48, self.height()), Qt.AlignmentFlag.AlignVCenter, "Automatically update next time")
+        painter.drawText(QRectF(40, 0, self.width() - 48, self.height()), self.label_alignment, self.label_text)
 
 
 class WorkerSignals(QObject):
@@ -232,7 +236,7 @@ class WorkerSignals(QObject):
     setup_done = Signal(str)
     self_update_started = Signal(str)
     cancelled = Signal(str)
-    error = Signal(str)
+    error = Signal(str, str)
 
 
 class SnowbreakLauncherApp(QWidget):
@@ -254,6 +258,8 @@ class SnowbreakLauncherApp(QWidget):
         self.ui_state = "disclaimer" if not self._notice_accepted() else "checking"
         self.busy = False
         self.cancel_requested = False
+        self.error_kind = "generic"
+        self._last_action = "checks"
         self.top_title = "Ready"
         self.top_detail = "Done."
         self.top_progress_value = 0.0
@@ -299,6 +305,10 @@ class SnowbreakLauncherApp(QWidget):
         self.cancel_button.move(394, 438)
         self.cancel_button.clicked.connect(self._cancel_action)
 
+        self.grant_admin_button = GlassButton("Grant Admin", self, width=128, height=30)
+        self.grant_admin_button.move(386, 438)
+        self.grant_admin_button.clicked.connect(self._grant_admin)
+
         self.uninstall_button = GlassButton("Uninstall", self, width=92, height=30)
         self.uninstall_button.move(14, 544 - 30)
         self.uninstall_button.clicked.connect(self._uninstall)
@@ -326,6 +336,7 @@ class SnowbreakLauncherApp(QWidget):
         self._set_footer_visibility(installed=show_installed_controls, show_error_tools=self.ui_state == "error")
         self.auto_update_pill.setVisible(show_installed_controls and self.ui_state == "ready_to_update" and not launcher_update_priority)
         self.cancel_button.setVisible(self.ui_state in {"installing", "updating"})
+        self.grant_admin_button.setVisible(self.ui_state == "admin_needed")
 
         if self.ui_state == "disclaimer":
             self._set_top_state("Before we start", "This tool only changes localization.txt and the ~ix mod folder. Use it at your own risk.", 0.0)
@@ -355,6 +366,11 @@ class SnowbreakLauncherApp(QWidget):
             self._set_top_state(title, "Working carefully. Please keep the launcher open.", self.top_progress_value)
             self.main_button.setText("Working...")
             self.main_button.setEnabled(False)
+        elif self.ui_state == "admin_needed":
+            self._set_top_state("Admin needed", "Snowbreak is in a protected folder.", 0.0)
+            self.status_label.setText("Move the game install, or grant admin for this patch.")
+            self.main_button.setText("Cancel")
+            self.main_button.setEnabled(True)
         elif self.ui_state == "self_updating":
             self._set_top_state("Updating launcher", "Downloading and preparing the new launcher.", self.top_progress_value)
             self.status_label.setText("Updating launcher...")
@@ -367,7 +383,7 @@ class SnowbreakLauncherApp(QWidget):
             self.main_button.setEnabled(True)
         elif self.ui_state == "error":
             self._set_top_state("Needs attention", "Something needs attention, but your setup was kept safe.", 0.0)
-            self.main_button.setText("Try Again")
+            self.main_button.setText("Retry" if self.error_kind == "network_retry" else "Try Again")
             self.main_button.setEnabled(True)
         if launcher_update_priority and self.launcher_update:
             self._set_top_state("Launcher update ready", "A new launcher version is available.", 0.0)
@@ -521,10 +537,22 @@ class SnowbreakLauncherApp(QWidget):
             self._start_setup_or_update()
         elif self.ui_state == "ready_to_launch":
             self._launch_game()
+        elif self.ui_state == "admin_needed":
+            self.close()
         elif self.ui_state == "error":
-            self.ui_state = "checking"
-            self._render()
-            self._start_checks()
+            if self.error_kind == "network_retry":
+                if self._last_action == "setup":
+                    self._start_setup_or_update()
+                elif self._last_action == "self_update":
+                    self._start_launcher_self_update()
+                else:
+                    self.ui_state = "checking"
+                    self._render()
+                    self._start_checks()
+            else:
+                self.ui_state = "checking"
+                self._render()
+                self._start_checks()
 
     def _launcher_update_has_priority(self) -> bool:
         return bool(self.launcher_update) and not self.busy and self.ui_state in {
@@ -536,13 +564,26 @@ class SnowbreakLauncherApp(QWidget):
     def _cancel_action(self) -> None:
         if self.busy:
             self.cancel_requested = True
-            self.status_label.setText("Cancelling after the current safe step...")
+            self.status_label.setText("Cancelling...")
             return
         self.close()
+
+    def _grant_admin(self) -> None:
+        if not is_packaged_app():
+            self._show_error("Grant Admin only works in the packaged EXE.")
+            return
+        try:
+            if relaunch_as_admin():
+                self.close()
+            else:
+                self._show_error("Admin prompt was cancelled.")
+        except Exception as exc:  # noqa: BLE001 - user-facing GUI boundary
+            self._show_error(f"Could not request admin rights: {exc}")
 
     def _start_checks(self) -> None:
         if self.busy:
             return
+        self._last_action = "checks"
         self.ui_state = "checking"
         self._render()
 
@@ -564,7 +605,8 @@ class SnowbreakLauncherApp(QWidget):
                 self._signals.checks_done.emit(install, release, launcher_update)
             except Exception as exc:  # noqa: BLE001 - user-facing GUI boundary
                 append_log(f"Update check failed: {exc}")
-                self._signals.error.emit(f"Could not check for updates: {exc}")
+                kind = _error_kind(exc)
+                self._signals.error.emit(_friendly_error_message(exc, fallback=f"Could not check for updates: {exc}"), kind)
 
         self._run_worker(work)
 
@@ -599,6 +641,10 @@ class SnowbreakLauncherApp(QWidget):
             return
         if self.install is None:
             return
+        if install_requires_admin(self.install):
+            self._show_admin_needed("Snowbreak is in a protected folder.")
+            return
+        self._last_action = "setup"
         self.cancel_requested = False
         self.ui_state = "updating" if self.local_install_complete and self.decision and self.decision.action_label == "Update" else "installing"
         self.top_progress_value = 0.0
@@ -620,7 +666,8 @@ class SnowbreakLauncherApp(QWidget):
                 self._signals.cancelled.emit(str(exc))
             except Exception as exc:  # noqa: BLE001 - user-facing GUI boundary
                 append_log(f"Setup failed: {exc}")
-                self._signals.error.emit(str(exc))
+                kind = _error_kind(exc)
+                self._signals.error.emit(_friendly_error_message(exc, fallback=str(exc)), kind)
 
         self._run_worker(work)
 
@@ -643,6 +690,7 @@ class SnowbreakLauncherApp(QWidget):
 
         self.ui_state = "self_updating"
         self.busy = True
+        self._last_action = "self_update"
         self.top_progress_value = 0.0
         self.status_label.setText("Downloading launcher update...")
         self._render()
@@ -665,10 +713,12 @@ class SnowbreakLauncherApp(QWidget):
                 self._signals.self_update_started.emit("Launcher update is ready. Restarting...")
             except SelfUpdateError as exc:
                 append_log(f"Launcher self-update failed: {exc}")
-                self._signals.error.emit(str(exc))
+                kind = _error_kind(exc)
+                self._signals.error.emit(_friendly_error_message(exc, fallback=str(exc)), kind)
             except Exception as exc:  # noqa: BLE001 - user-facing GUI boundary
                 append_log(f"Launcher self-update failed: {exc}")
-                self._signals.error.emit(f"Launcher update failed: {exc}")
+                kind = _error_kind(exc)
+                self._signals.error.emit(_friendly_error_message(exc, fallback=f"Launcher update failed: {exc}"), kind)
 
         self._run_worker(work)
 
@@ -796,9 +846,23 @@ class SnowbreakLauncherApp(QWidget):
         self.status_label.setText("Cancelled. No partial download was installed.")
         self._render()
 
-    def _show_error(self, message: str) -> None:
+    def _show_admin_needed(self, message: str) -> None:
         cleanup_app_data()
         self.busy = False
+        self.error_kind = "permission"
+        self.ui_state = "admin_needed"
+        self.status_label.setText("Move the game install, or grant admin for this patch.")
+        append_log(message)
+        self._render()
+
+    def _show_error(self, message: str, kind: str = "generic") -> None:
+        if kind == "permission":
+            self._show_admin_needed(message)
+            return
+        if kind != "network_retry":
+            cleanup_app_data()
+        self.busy = False
+        self.error_kind = kind
         self.ui_state = "error"
         self.status_label.setText(message)
         self._render()
@@ -883,6 +947,34 @@ def _fitted_font(
 
 def _elided_text(font: QFont, text: str, max_width: int) -> str:
     return QFontMetrics(font).elidedText(text, Qt.TextElideMode.ElideRight, max_width)
+
+
+def _error_kind(exc: BaseException) -> str:
+    for current in _exception_chain(exc):
+        if isinstance(current, PermissionError):
+            return "permission"
+    for current in _exception_chain(exc):
+        if is_retryable_download_exception(current):
+            return "network_retry"
+    return "generic"
+
+
+def _friendly_error_message(exc: BaseException, *, fallback: str) -> str:
+    kind = _error_kind(exc)
+    if kind == "permission":
+        return "Snowbreak is in a protected folder."
+    if kind == "network_retry":
+        return "Download failed. Check your connection and retry."
+    return fallback
+
+
+def _exception_chain(exc: BaseException):
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
 
 
 def open_release_page() -> str:

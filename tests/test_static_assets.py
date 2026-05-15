@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import zipfile
 import os
+import hashlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -59,6 +60,28 @@ class StaticAssetTests(unittest.TestCase):
                 self.assertTrue((ix / name).exists())
             self.assertFalse((ix / "extra.pak").exists())
 
+    def test_import_static_zip_streams_member_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            zip_path = root / "assets.zip"
+            with zipfile.ZipFile(zip_path, "w") as archive:
+                for name in STATIC_ASSET_NAMES:
+                    archive.writestr(name, f"content-{name}")
+
+            ix = root / "Game" / "Content" / "Paks" / "~ix"
+            copy_calls: list[tuple[object, object]] = []
+
+            def fake_copyfileobj(source, output):
+                copy_calls.append((source, output))
+                while chunk := source.read(4):
+                    output.write(chunk)
+
+            with patch("snowbreak_launcher.static_assets.shutil.copyfileobj", side_effect=fake_copyfileobj):
+                installed = import_static_zip(zip_path, ix)
+
+            self.assertEqual(set(installed), STATIC_ASSET_NAMES)
+            self.assertEqual(len(copy_calls), len(STATIC_ASSET_NAMES))
+
     def test_import_static_zip_rejects_missing_static_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -84,6 +107,7 @@ class StaticAssetTests(unittest.TestCase):
     def test_static_zip_download_removes_temp_after_hash_failure(self) -> None:
         class FakeResponse:
             headers = {"Content-Length": "3"}
+            status_code = 200
 
             def raise_for_status(self) -> None:
                 return None
@@ -101,6 +125,40 @@ class StaticAssetTests(unittest.TestCase):
                     download_static_zip("https://example.invalid/static.zip", "0" * 64)
 
             self.assertFalse((downloads / "snowbreak-static-assets.zip.download").exists())
+
+    def test_static_zip_download_resumes_existing_partial_download(self) -> None:
+        class FakeResponse:
+            status_code = 206
+            headers = {"Content-Length": "3"}
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def iter_content(self, chunk_size: int):
+                yield b"llo"
+
+        captured: dict[str, object] = {}
+
+        def fake_get(url: str, **kwargs):
+            captured["headers"] = kwargs.get("headers")
+            return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as temp:
+            downloads = Path(temp)
+            partial = downloads / "snowbreak-static-assets.zip.download"
+            partial.write_bytes(b"he")
+            with (
+                patch("snowbreak_launcher.static_assets.downloads_dir", return_value=downloads),
+                patch("snowbreak_launcher.static_assets.requests.get", side_effect=fake_get),
+            ):
+                path = download_static_zip(
+                    "https://example.invalid/static.zip",
+                    hashlib.sha256(b"hello").hexdigest(),
+                )
+
+            self.assertEqual(captured["headers"], {"Range": "bytes=2-"})
+            self.assertEqual(path.read_bytes(), b"hello")
+            self.assertFalse(partial.exists())
 
     def test_static_pack_current_when_url_and_hash_match_and_files_exist(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

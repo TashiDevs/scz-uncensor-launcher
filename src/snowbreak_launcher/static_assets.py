@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import hashlib
 import os
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -9,6 +9,7 @@ import requests
 
 from .config import append_log, downloads_dir
 from .constants import DEFAULT_STATIC_ASSET_SHA256, DEFAULT_STATIC_ASSET_URL, MANAGED_FOLDER_NAME, STATIC_ASSET_NAMES
+from .download_utils import download_with_resume
 from .github_client import file_sha256
 from .models import LauncherState
 
@@ -27,38 +28,22 @@ def configured_static_download() -> tuple[str, str] | None:
     return DEFAULT_STATIC_ASSET_URL, DEFAULT_STATIC_ASSET_SHA256
 
 
-def download_static_zip(url: str, expected_sha256: str, progress: callable | None = None) -> Path:
+def download_static_zip(
+    url: str,
+    expected_sha256: str,
+    progress: callable | None = None,
+    cancel_check: callable | None = None,
+) -> Path:
     target = downloads_dir() / "snowbreak-static-assets.zip"
-    temp = target.with_suffix(".zip.download")
-    temp.unlink(missing_ok=True)
-
-    digest = hashlib.sha256()
-    downloaded = 0
-    try:
-        response = requests.get(url, stream=True, timeout=60)
-        response.raise_for_status()
-
-        total = int(response.headers.get("Content-Length") or 0)
-        with temp.open("wb") as handle:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if not chunk:
-                    continue
-                handle.write(chunk)
-                digest.update(chunk)
-                downloaded += len(chunk)
-                if progress:
-                    progress(downloaded, total)
-    except Exception:
-        temp.unlink(missing_ok=True)
-        raise
-
-    actual = digest.hexdigest()
-    if actual.lower() != expected_sha256.lower():
-        temp.unlink(missing_ok=True)
-        raise StaticAssetError("Static asset ZIP hash mismatch. The file was not installed.")
-
-    os.replace(temp, target)
-    return target
+    return download_with_resume(
+        url,
+        target,
+        expected_sha256,
+        request_get=requests.get,
+        progress=progress,
+        cancel_check=cancel_check,
+        hash_error=StaticAssetError("Static asset ZIP hash mismatch. The file was not installed."),
+    )
 
 
 def import_static_zip(zip_path: Path, ix_folder: Path) -> list[str]:
@@ -84,7 +69,7 @@ def import_static_zip(zip_path: Path, ix_folder: Path) -> list[str]:
         for name, info in found.items():
             target = ix_folder / name
             with archive.open(info) as source, target.open("wb") as output:
-                output.write(source.read())
+                shutil.copyfileobj(source, output)
             installed.append(name)
             append_log(f"Imported static asset {name}")
     return sorted(installed)

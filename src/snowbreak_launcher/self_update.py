@@ -16,6 +16,7 @@ import requests
 
 from .config import app_data_dir, append_log, downloads_dir
 from .constants import APP_VERSION, LAUNCHER_EXE_NAME, LAUNCHER_RELEASE_API
+from .download_utils import download_with_resume
 
 
 class SelfUpdateError(RuntimeError):
@@ -91,40 +92,21 @@ def download_launcher_update(
     update: LauncherUpdateInfo,
     progress: callable | None = None,
     session: requests.Session | None = None,
+    cancel_check: callable | None = None,
 ) -> Path:
     target_dir = downloads_dir() / "launcher-updates" / _safe_tag(update.tag_name)
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / LAUNCHER_EXE_NAME
-    temp_path = target.with_suffix(".exe.download")
-    temp_path.unlink(missing_ok=True)
-
-    digest = hashlib.sha256()
-    downloaded = 0
-    try:
-        client = session or requests.Session()
-        response = client.get(update.download_url, stream=True, timeout=60)
-        response.raise_for_status()
-
-        with temp_path.open("wb") as handle:
-            for chunk in response.iter_content(chunk_size=1024 * 1024):
-                if not chunk:
-                    continue
-                handle.write(chunk)
-                digest.update(chunk)
-                downloaded += len(chunk)
-                if progress:
-                    progress(downloaded, update.asset_size)
-    except Exception:
-        temp_path.unlink(missing_ok=True)
-        raise
-
-    actual = digest.hexdigest().lower()
-    if actual != update.asset_sha256.lower():
-        temp_path.unlink(missing_ok=True)
-        raise SelfUpdateError("Launcher update SHA-256 did not match. Nothing was replaced.")
-
-    os.replace(temp_path, target)
-    return target
+    return download_with_resume(
+        update.download_url,
+        target,
+        update.asset_sha256,
+        expected_size=update.asset_size,
+        session=session,
+        progress=progress,
+        cancel_check=cancel_check,
+        hash_error=SelfUpdateError("Launcher update SHA-256 did not match. Nothing was replaced."),
+    )
 
 
 def prepare_self_update(
@@ -259,7 +241,9 @@ def _find_launcher_asset(data: dict) -> dict:
         if str(asset.get("name") or "").lower() == LAUNCHER_EXE_NAME.lower():
             return asset
     for asset in assets:
-        if str(asset.get("name") or "").lower().endswith(".exe"):
+        name = str(asset.get("name") or "")
+        lowered = name.lower()
+        if lowered.startswith(LAUNCHER_EXE_NAME.lower().removesuffix(".exe")) and lowered.endswith(".exe"):
             return asset
     raise SelfUpdateError("Launcher update release did not contain an EXE asset.")
 
@@ -363,4 +347,3 @@ def _cleanup_updater_dir() -> None:
         shutil.rmtree(app_data_dir() / "updater")
     except OSError:
         pass
-
