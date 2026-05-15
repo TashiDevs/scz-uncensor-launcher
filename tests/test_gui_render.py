@@ -334,6 +334,8 @@ class GuiRenderTests(unittest.TestCase):
             self.assertEqual(app.main_button.text(), "Update Launcher")
             self.assertEqual(app.status_label._text, "Launcher update available: v1.06")
             self.assertFalse(hasattr(app, "self_update_button"))
+            self.assertEqual(app.skip_update_button.text(), "Skip")
+            self.assertFalse(app.skip_update_button.isHidden())
         finally:
             app.close()
             app.deleteLater()
@@ -380,6 +382,73 @@ class GuiRenderTests(unittest.TestCase):
                 app._main_action()
 
             start_self_update.assert_called_once()
+        finally:
+            app.close()
+            app.deleteLater()
+
+    def test_skip_launcher_update_restores_normal_action(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with (
+            patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+            patch("snowbreak_launcher.app.cleanup_app_data"),
+        ):
+            qt_app = create_application([])
+            app = SnowbreakLauncherApp()
+        try:
+            app.launcher_update = LauncherUpdateInfo(
+                tag_name="v1.07",
+                html_url="https://example.invalid/release",
+                asset_name="SnowbreakUncensorLauncher.exe",
+                asset_size=123,
+                asset_sha256="a" * 64,
+                download_url="https://example.invalid/SnowbreakUncensorLauncher.exe",
+            )
+            app.ui_state = "ready_to_launch"
+            app._render()
+            self.assertEqual(app.main_button.text(), "Update Launcher")
+
+            app._skip_launcher_update()
+            qt_app.processEvents()
+
+            self.assertFalse(app._launcher_update_has_priority())
+            self.assertEqual(app.main_button.text(), "Launch")
+            self.assertTrue(app.skip_update_button.isHidden())
+        finally:
+            app.close()
+            app.deleteLater()
+
+    def test_launcher_update_starts_without_confirmation_popup(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with (
+            patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+            patch("snowbreak_launcher.app.cleanup_app_data"),
+        ):
+            qt_app = create_application([])
+            app = SnowbreakLauncherApp()
+        try:
+            app.launcher_update = LauncherUpdateInfo(
+                tag_name="v1.07",
+                html_url="https://example.invalid/release",
+                asset_name="SnowbreakUncensorLauncher.exe",
+                asset_size=123,
+                asset_sha256="a" * 64,
+                download_url="https://example.invalid/SnowbreakUncensorLauncher.exe",
+            )
+
+            with (
+                patch("snowbreak_launcher.app.is_packaged_app", return_value=True),
+                patch("snowbreak_launcher.app.QMessageBox.question") as question,
+                patch.object(app, "_run_worker") as run_worker,
+            ):
+                app._start_launcher_self_update()
+
+            question.assert_not_called()
+            run_worker.assert_called_once()
+            self.assertEqual(app.ui_state, "self_updating")
         finally:
             app.close()
             app.deleteLater()

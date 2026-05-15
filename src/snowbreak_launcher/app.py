@@ -254,6 +254,7 @@ class SnowbreakLauncherApp(QWidget):
         self.install: InstallInfo | None = state_to_install(self.state_data)
         self.latest_release: GitHubRelease | None = None
         self.launcher_update: LauncherUpdateInfo | None = None
+        self.skipped_launcher_update_tag = ""
         self.decision: UpdateDecision | None = None
         self.ui_state = "disclaimer" if not self._notice_accepted() else "checking"
         self.busy = False
@@ -309,6 +310,10 @@ class SnowbreakLauncherApp(QWidget):
         self.grant_admin_button.move(386, 438)
         self.grant_admin_button.clicked.connect(self._grant_admin)
 
+        self.skip_update_button = GlassButton("Skip", self, width=88, height=30)
+        self.skip_update_button.move(406, 398)
+        self.skip_update_button.clicked.connect(self._skip_launcher_update)
+
         self.uninstall_button = GlassButton("Uninstall", self, width=92, height=30)
         self.uninstall_button.move(14, 544 - 30)
         self.uninstall_button.clicked.connect(self._uninstall)
@@ -337,6 +342,7 @@ class SnowbreakLauncherApp(QWidget):
         self.auto_update_pill.setVisible(show_installed_controls and self.ui_state == "ready_to_update" and not launcher_update_priority)
         self.cancel_button.setVisible(self.ui_state in {"installing", "updating"})
         self.grant_admin_button.setVisible(self.ui_state == "admin_needed")
+        self.skip_update_button.setVisible(launcher_update_priority)
 
         if self.ui_state == "disclaimer":
             self._set_top_state("Before we start", "This tool only changes localization.txt and the ~ix mod folder. Use it at your own risk.", 0.0)
@@ -555,11 +561,19 @@ class SnowbreakLauncherApp(QWidget):
                 self._start_checks()
 
     def _launcher_update_has_priority(self) -> bool:
-        return bool(self.launcher_update) and not self.busy and self.ui_state in {
+        return bool(self.launcher_update) and not self._launcher_update_skipped() and not self.busy and self.ui_state in {
             "ready_to_install",
             "ready_to_update",
             "ready_to_launch",
         }
+
+    def _launcher_update_skipped(self) -> bool:
+        return bool(self.launcher_update and self.skipped_launcher_update_tag == self.launcher_update.tag_name)
+
+    def _skip_launcher_update(self) -> None:
+        if self.launcher_update:
+            self.skipped_launcher_update_tag = self.launcher_update.tag_name
+        self._render()
 
     def _cancel_action(self) -> None:
         if self.busy:
@@ -676,16 +690,6 @@ class SnowbreakLauncherApp(QWidget):
             return
         if not is_packaged_app():
             self._show_error("Launcher self-update is only available in the packaged EXE.")
-            return
-        confirmed = QMessageBox.question(
-            self,
-            "Update launcher",
-            f"Download and install launcher {self.launcher_update.tag_name}?\n\n"
-            "The launcher will close and reopen after the update.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if confirmed != QMessageBox.StandardButton.Yes:
             return
 
         self.ui_state = "self_updating"
