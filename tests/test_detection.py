@@ -13,7 +13,9 @@ from snowbreak_launcher.detection import (
     SEASUN_STANDALONE_REGISTRY_KEY,
     _detect_standalone_installs,
     _seasun_standalone_registry_locations,
+    auto_detect_install,
     build_install_info,
+    detect_all_installs,
     resolve_manual_install,
     validate_ix_folder,
 )
@@ -37,6 +39,16 @@ class DetectionTests(unittest.TestCase):
         (nested_game / "Game" / "cbjq").mkdir(parents=True)
         (base / "launcher.exe").write_text("", encoding="utf-8")
         return base, game, nested_game, paks
+
+    def _make_steam_install(self, library: Path, install_dir: str = "SNOWBREAK") -> tuple[Path, Path]:
+        common = library / "steamapps" / "common"
+        game = common / install_dir
+        paks = game / "Game" / "Content" / "Paks"
+        paks.mkdir(parents=True)
+        manifest = library / "steamapps" / "appmanifest_2668080.acf"
+        manifest.parent.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(f'"installdir" "{install_dir}"\n', encoding="utf-8")
+        return game, paks
 
     def test_steam_root_sets_localization_in_common_folder(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -66,6 +78,69 @@ class DetectionTests(unittest.TestCase):
             assert install is not None
             self.assertEqual(install.install_type, "Steam")
             self.assertEqual(install.localization_path, common / "localization.txt")
+
+    def test_detect_all_installs_returns_multiple_steam_libraries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            steam_root = Path(temp) / "Steam"
+            second_library = Path(temp) / "SteamLibrary2"
+            first_game, first_paks = self._make_steam_install(steam_root)
+            second_game, second_paks = self._make_steam_install(second_library)
+            library_file = steam_root / "steamapps" / "libraryfolders.vdf"
+            escaped_second_library = str(second_library).replace("\\", "\\\\")
+            library_file.write_text(f'"path" "{escaped_second_library}"\n', encoding="utf-8")
+
+            with (
+                patch("snowbreak_launcher.detection._steam_roots_from_registry", return_value=[steam_root]),
+                patch("snowbreak_launcher.detection._detect_standalone_installs", return_value=[]),
+            ):
+                installs = detect_all_installs()
+
+            self.assertEqual([install.install_type for install in installs], ["Steam", "Steam"])
+            self.assertEqual([install.game_root for install in installs], [first_game.resolve(), second_game.resolve()])
+            self.assertEqual([install.paks_root for install in installs], [first_paks.resolve(), second_paks.resolve()])
+
+    def test_detect_all_installs_returns_multiple_standalone_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            base_a, game_a, paks_a = self._make_seasun_nested_install(str(Path(temp) / "A"))
+            base_b, game_b, paks_b = self._make_seasun_nested_install(str(Path(temp) / "B"))
+
+            with (
+                patch("snowbreak_launcher.detection._steam_roots_from_registry", return_value=[]),
+                patch("snowbreak_launcher.detection._standalone_root_candidates", return_value=[base_a, game_a, base_b, game_b]),
+            ):
+                installs = detect_all_installs()
+
+            self.assertEqual([install.install_type for install in installs], ["Standalone", "Standalone"])
+            self.assertEqual([install.game_root for install in installs], [game_a.resolve(), game_b.resolve()])
+            self.assertEqual([install.paks_root for install in installs], [paks_a.resolve(), paks_b.resolve()])
+
+    def test_detect_all_installs_deduplicates_by_paks_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            _base, game, paks = self._make_seasun_nested_install(temp)
+
+            with (
+                patch("snowbreak_launcher.detection._steam_roots_from_registry", return_value=[]),
+                patch("snowbreak_launcher.detection._standalone_root_candidates", return_value=[game, game, paks]),
+            ):
+                installs = detect_all_installs()
+
+            self.assertEqual(len(installs), 1)
+            self.assertEqual(installs[0].paks_root, paks.resolve())
+
+    def test_auto_detect_install_returns_first_valid_candidate_for_compatibility(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            first_base, first_game, _first_paks = self._make_seasun_nested_install(str(Path(temp) / "First"))
+            second_base, second_game, _second_paks = self._make_seasun_nested_install(str(Path(temp) / "Second"))
+
+            with (
+                patch("snowbreak_launcher.detection._steam_roots_from_registry", return_value=[]),
+                patch("snowbreak_launcher.detection._standalone_root_candidates", return_value=[first_base, first_game, second_base, second_game]),
+            ):
+                install = auto_detect_install()
+
+            self.assertIsNotNone(install)
+            assert install is not None
+            self.assertEqual(install.game_root, first_game.resolve())
 
     def test_standalone_prefers_game_cbjq_localization_when_parent_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

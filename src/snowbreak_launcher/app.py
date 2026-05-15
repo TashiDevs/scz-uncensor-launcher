@@ -11,14 +11,15 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QIcon, QPainter, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
+    QInputDialog,
     QMessageBox,
     QAbstractButton,
     QWidget,
 )
 
-from .config import cleanup_app_data, append_log, install_to_state, load_env_file, load_state, log_path, save_state, state_to_install
+from .config import cleanup_app_data, append_log, clear_install_state, install_to_state, load_env_file, load_state, log_path, save_state, state_to_install
 from .constants import APP_NAME, APP_VERSION, GITHUB_RELEASE_PAGE
-from .detection import auto_detect_install, resolve_manual_install, validate_ix_folder
+from .detection import detect_all_installs, resolve_manual_install, validate_ix_folder
 from .download_utils import is_retryable_download_exception
 from .github_client import fetch_latest_release
 from .installer import setup_or_update, static_asset_status, uncensor_file_status, uninstall_all_managed_files
@@ -232,7 +233,7 @@ class AutoUpdatePill(QWidget):
 
 class WorkerSignals(QObject):
     progress = Signal(object)
-    checks_done = Signal(object, object, object)
+    checks_done = Signal(object, object, object, object)
     setup_done = Signal(str)
     self_update_started = Signal(str)
     cancelled = Signal(str)
@@ -252,6 +253,7 @@ class SnowbreakLauncherApp(QWidget):
 
         self.state_data: LauncherState = load_state()
         self.install: InstallInfo | None = state_to_install(self.state_data)
+        self.detected_install_choices: list[InstallInfo] = []
         self.latest_release: GitHubRelease | None = None
         self.launcher_update: LauncherUpdateInfo | None = None
         self.skipped_launcher_update_tag = ""
@@ -337,6 +339,7 @@ class SnowbreakLauncherApp(QWidget):
             "updating",
             "self_updating",
             "disclaimer",
+            "choose_install",
         }
         self._set_footer_visibility(installed=show_installed_controls, show_error_tools=self.ui_state == "error")
         self.auto_update_pill.setVisible(show_installed_controls and self.ui_state == "ready_to_update" and not launcher_update_priority)
@@ -360,6 +363,11 @@ class SnowbreakLauncherApp(QWidget):
             self._set_top_state(title, reason, 0.0)
             self.status_label.setText(_short_status_text(reason))
             self.main_button.setText("Choose Folder" if self.install is None else "Install")
+            self.main_button.setEnabled(True)
+        elif self.ui_state == "choose_install":
+            self._set_top_state("Choose install", "More than one Snowbreak install was found.", 0.0)
+            self.status_label.setText("Choose which Snowbreak install to manage.")
+            self.main_button.setText("Choose Install")
             self.main_button.setEnabled(True)
         elif self.ui_state == "ready_to_update":
             reason = self.decision.reason if self.decision else "Ready to update."
@@ -401,7 +409,7 @@ class SnowbreakLauncherApp(QWidget):
     def _current_checklist(self) -> dict[str, tuple[str, str]]:
         if self.ui_state in {"checking", "error"}:
             return {
-            "Game": ("idle", "Checking game"),
+                "Game": ("idle", "Checking game"),
                 "Switch": ("idle", "Checking loc"),
                 "Core": ("idle", "Checking files"),
                 "Assets": ("idle", "Checking assets"),
@@ -412,6 +420,13 @@ class SnowbreakLauncherApp(QWidget):
                 "Switch": ("idle", "loc check"),
                 "Core": ("idle", "Uncensor check"),
                 "Assets": ("idle", "Assets check"),
+            }
+        if self.ui_state == "choose_install":
+            return {
+                "Game": ("warn", f"{len(self.detected_install_choices)} installs"),
+                "Switch": ("pending", "Choose loc"),
+                "Core": ("pending", "Uncensor pending"),
+                "Assets": ("pending", "Assets pending"),
             }
 
         install = self.install
@@ -541,6 +556,8 @@ class SnowbreakLauncherApp(QWidget):
             self._start_checks()
         elif self.ui_state in {"ready_to_install", "ready_to_update"}:
             self._start_setup_or_update()
+        elif self.ui_state == "choose_install":
+            self._choose_detected_install()
         elif self.ui_state == "ready_to_launch":
             self._launch_game()
         elif self.ui_state == "admin_needed":
@@ -608,7 +625,12 @@ class SnowbreakLauncherApp(QWidget):
                     launcher_update = fetch_launcher_update()
                 except Exception as exc:  # noqa: BLE001 - optional self-update check
                     append_log(f"Launcher update check failed: {exc}")
-                install = self.install or auto_detect_install()
+                install = self.install
+                install_choices: list[InstallInfo] = []
+                if install is None:
+                    install_choices = detect_all_installs()
+                    if len(install_choices) == 1:
+                        install = install_choices[0]
                 release = None
                 if install:
                     install_to_state(install, self.state_data)
@@ -616,7 +638,7 @@ class SnowbreakLauncherApp(QWidget):
                     self.state_data.last_checked_release = release.tag_name
                     self.state_data.last_check_time = datetime.now().isoformat(timespec="seconds")
                     save_state(self.state_data)
-                self._signals.checks_done.emit(install, release, launcher_update)
+                self._signals.checks_done.emit(install, release, launcher_update, install_choices)
             except Exception as exc:  # noqa: BLE001 - user-facing GUI boundary
                 append_log(f"Update check failed: {exc}")
                 kind = _error_kind(exc)
@@ -629,10 +651,19 @@ class SnowbreakLauncherApp(QWidget):
         install: InstallInfo | None,
         release: GitHubRelease | None,
         launcher_update: LauncherUpdateInfo | None = None,
+        install_choices: list[InstallInfo] | None = None,
     ) -> None:
         self.install = install
         self.latest_release = release
         self.launcher_update = launcher_update
+        self.detected_install_choices = install_choices or []
+        if install is None and len(self.detected_install_choices) > 1:
+            self.decision = UpdateDecision("choose_install", "Choose Install", "Choose which Snowbreak install to manage.")
+            self.local_install_complete = False
+            self.ui_state = "choose_install"
+            self.busy = False
+            self._render()
+            return
         static_ok = False
         core_ok = False
         if install:
@@ -727,7 +758,7 @@ class SnowbreakLauncherApp(QWidget):
         self._run_worker(work)
 
     def _choose_folder(self) -> bool:
-        selected = QFileDialog.getExistingDirectory(self, "Choose your Snowbreak folder")
+        selected = QFileDialog.getExistingDirectory(self, "Choose Snowbreak installation folder")
         if not selected:
             return False
         install = resolve_manual_install(selected)
@@ -738,6 +769,36 @@ class SnowbreakLauncherApp(QWidget):
         install_to_state(install, self.state_data)
         save_state(self.state_data)
         append_log(f"Selected install: {install.game_root}")
+        return True
+
+    def _choose_detected_install(self) -> bool:
+        if not self.detected_install_choices:
+            return False
+        if len(self.detected_install_choices) == 1:
+            install = self.detected_install_choices[0]
+        else:
+            labels = [_install_choice_label(candidate) for candidate in self.detected_install_choices]
+            selected, accepted = QInputDialog.getItem(
+                self,
+                "Choose install",
+                "Choose Snowbreak installation:",
+                labels,
+                0,
+                False,
+            )
+            if not accepted or not selected:
+                return False
+            try:
+                install = self.detected_install_choices[labels.index(selected)]
+            except ValueError:
+                return False
+        self.install = install
+        install_to_state(install, self.state_data)
+        save_state(self.state_data)
+        append_log(f"Selected detected install: {install.game_root}")
+        self.ui_state = "checking"
+        self._render()
+        self._start_checks()
         return True
 
     def _launch_game(self) -> None:
@@ -767,8 +828,7 @@ class SnowbreakLauncherApp(QWidget):
         confirmed = QMessageBox.question(
             self,
             "Uninstall uncensor files",
-            "This removes all files inside Game\\Content\\Paks\\~ix and clears the installed status.\n\n"
-            "Nothing outside ~ix will be touched.",
+            "This removes all files inside Game\\Content\\Paks\\~ix and clears the installed status.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -777,14 +837,16 @@ class SnowbreakLauncherApp(QWidget):
         try:
             validate_ix_folder(self.install.paks_root, self.install.ix_folder)
             removed = uninstall_all_managed_files(self.install, self.state_data)
-            self.state_data.installed_release = None
-            self.state_data.installed_files = {}
+            clear_install_state(self.state_data)
             save_state(self.state_data)
+            self.install = None
+            self.detected_install_choices = []
             self.core_files_installed = False
             self.static_assets_installed = False
             self.local_install_complete = False
             self.status_label.setText(f"Uninstalled {removed} file(s)/folder(s).")
             self.ui_state = "ready_to_install"
+            self.decision = decide_next_state(self.state_data, None, self.latest_release, False, False)
             self._render()
         except Exception as exc:  # noqa: BLE001 - user-facing GUI boundary
             self._show_error(f"Uninstall failed: {exc}")
@@ -924,6 +986,10 @@ def _short_status_text(text: str) -> str:
     if "install" in lowered:
         return "Ready to install."
     return text if len(text) <= 32 else text[:29].rstrip() + "..."
+
+
+def _install_choice_label(install: InstallInfo) -> str:
+    return f"{install.install_type} - {install.game_root}"
 
 
 def _progress_status_text(event: ProgressEvent) -> str:

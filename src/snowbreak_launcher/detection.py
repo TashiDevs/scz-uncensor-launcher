@@ -16,9 +16,24 @@ SEASUN_NESTED_GAME_PARTS = ("Game", "snowbreak")
 
 
 def auto_detect_install() -> InstallInfo | None:
-    for candidate in (*_detect_steam_installs(), *_detect_standalone_installs()):
+    for candidate in detect_all_installs():
         return candidate
     return None
+
+
+def detect_all_installs() -> list[InstallInfo]:
+    installs: list[InstallInfo] = []
+    seen_paks: set[str] = set()
+    for candidate in (*_detect_steam_installs(), *_detect_standalone_installs()):
+        try:
+            paks_key = str(candidate.paks_root.resolve()).lower()
+        except OSError:
+            paks_key = str(candidate.paks_root.absolute()).lower()
+        if paks_key in seen_paks:
+            continue
+        seen_paks.add(paks_key)
+        installs.append(candidate)
+    return installs
 
 
 def resolve_manual_install(selected: str | Path) -> InstallInfo | None:

@@ -106,6 +106,19 @@ def install_to_state(install: InstallInfo, state: LauncherState) -> LauncherStat
     return state
 
 
+def clear_install_state(state: LauncherState) -> LauncherState:
+    state.install_type = None
+    state.game_root = None
+    state.paks_root = None
+    state.ix_folder = None
+    state.localization_path = None
+    state.launcher_exe = None
+    state.installed_release = None
+    state.installed_files = {}
+    state.static_asset_pack = {}
+    return state
+
+
 def state_to_install(state: LauncherState) -> InstallInfo | None:
     required = (state.install_type, state.game_root, state.paks_root, state.ix_folder, state.localization_path)
     if not all(required):

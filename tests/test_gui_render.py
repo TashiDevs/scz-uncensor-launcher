@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import tests.context  # noqa: F401
+from snowbreak_launcher.constants import APP_VERSION
 from snowbreak_launcher.constants import STATIC_ASSET_NAMES
 from snowbreak_launcher.models import GitHubRelease, InstallInfo, LauncherState
 from snowbreak_launcher.self_update import LauncherUpdateInfo
@@ -218,6 +219,56 @@ class GuiRenderTests(unittest.TestCase):
                 app.close()
                 app.deleteLater()
 
+    def test_uninstall_clears_saved_install_choice(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from PySide6.QtWidgets import QMessageBox
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with tempfile.TemporaryDirectory() as temp:
+            install = self._make_install(temp)
+            state = LauncherState(
+                accepted_notice=True,
+                auto_update_enabled=True,
+                install_type="Steam",
+                game_root=str(install.game_root),
+                paks_root=str(install.paks_root),
+                ix_folder=str(install.ix_folder),
+                localization_path=str(install.localization_path),
+                installed_release="AntiAmend-current",
+                installed_files={"core.pak": "hash"},
+                static_asset_pack={"sha256": "hash"},
+            )
+
+            with (
+                patch("snowbreak_launcher.app.load_state", return_value=state),
+                patch("snowbreak_launcher.app.cleanup_app_data"),
+            ):
+                qt_app = create_application([])
+                app = SnowbreakLauncherApp()
+            try:
+                app.install = install
+                app.local_install_complete = True
+                with (
+                    patch("snowbreak_launcher.app.QMessageBox.question", return_value=QMessageBox.StandardButton.Yes) as question,
+                    patch("snowbreak_launcher.app.uninstall_all_managed_files", return_value=0),
+                ):
+                    app._uninstall()
+                qt_app.processEvents()
+
+                self.assertNotIn("Nothing outside ~ix will be touched.", question.call_args.args[2])
+                self.assertIsNone(app.install)
+                self.assertIsNone(app.state_data.game_root)
+                self.assertIsNone(app.state_data.installed_release)
+                self.assertEqual(app.state_data.installed_files, {})
+                self.assertEqual(app.state_data.static_asset_pack, {})
+                self.assertTrue(app.state_data.accepted_notice)
+                self.assertTrue(app.state_data.auto_update_enabled)
+                self.assertTrue(app.uninstall_button.isHidden())
+                self.assertEqual(app.main_button.text(), "Choose Folder")
+            finally:
+                app.close()
+                app.deleteLater()
+
     def test_missing_game_renders_choose_folder_button(self) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
@@ -235,6 +286,99 @@ class GuiRenderTests(unittest.TestCase):
             self.assertEqual(app.ui_state, "ready_to_install")
             self.assertEqual(app.top_title, "Game needed")
             self.assertEqual(app.main_button.text(), "Choose Folder")
+        finally:
+            app.close()
+            app.deleteLater()
+
+    def test_multiple_detected_installs_render_choose_install(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with tempfile.TemporaryDirectory() as temp:
+            steam_install = self._make_install(str(Path(temp) / "Steam"))
+            standalone_install = InstallInfo(
+                install_type="Standalone",
+                game_root=Path(temp) / "Standalone",
+                paks_root=Path(temp) / "Standalone" / "Game" / "Content" / "Paks",
+                ix_folder=Path(temp) / "Standalone" / "Game" / "Content" / "Paks" / "~ix",
+                localization_path=Path(temp) / "Standalone" / "Game" / "cbjq" / "localization.txt",
+            )
+            standalone_install.ix_folder.mkdir(parents=True)
+            standalone_install.localization_path.parent.mkdir(parents=True)
+
+            with (
+                patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+                patch("snowbreak_launcher.app.cleanup_app_data"),
+            ):
+                qt_app = create_application([])
+                app = SnowbreakLauncherApp()
+            try:
+                app._finish_checks(None, None, None, [steam_install, standalone_install])
+                qt_app.processEvents()
+
+                self.assertEqual(app.ui_state, "choose_install")
+                self.assertEqual(app.top_title, "Choose install")
+                self.assertEqual(app.main_button.text(), "Choose Install")
+                self.assertEqual(app.status_label._text, "Choose which Snowbreak install to manage.")
+            finally:
+                app.close()
+                app.deleteLater()
+
+    def test_choose_detected_install_saves_selected_choice(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, _install_choice_label, create_application
+
+        with tempfile.TemporaryDirectory() as temp:
+            first_install = self._make_install(str(Path(temp) / "First"))
+            second_install = self._make_install(str(Path(temp) / "Second"))
+            second_install = InstallInfo(
+                install_type="Standalone",
+                game_root=second_install.game_root,
+                paks_root=second_install.paks_root,
+                ix_folder=second_install.ix_folder,
+                localization_path=second_install.localization_path,
+            )
+
+            with (
+                patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+                patch("snowbreak_launcher.app.cleanup_app_data"),
+            ):
+                qt_app = create_application([])
+                app = SnowbreakLauncherApp()
+            try:
+                app.detected_install_choices = [first_install, second_install]
+                chosen_label = _install_choice_label(second_install)
+
+                with (
+                    patch("snowbreak_launcher.app.QInputDialog.getItem", return_value=(chosen_label, True)),
+                    patch.object(app, "_start_checks") as start_checks,
+                ):
+                    self.assertTrue(app._choose_detected_install())
+
+                self.assertEqual(app.install, second_install)
+                self.assertEqual(app.state_data.install_type, "Standalone")
+                self.assertEqual(app.state_data.game_root, str(second_install.game_root))
+                start_checks.assert_called_once()
+            finally:
+                app.close()
+                app.deleteLater()
+
+    def test_manual_picker_uses_snowbreak_installation_folder_title(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with (
+            patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+            patch("snowbreak_launcher.app.cleanup_app_data"),
+        ):
+            qt_app = create_application([])
+            app = SnowbreakLauncherApp()
+        try:
+            with patch("snowbreak_launcher.app.QFileDialog.getExistingDirectory", return_value="") as picker:
+                self.assertFalse(app._choose_folder())
+
+            picker.assert_called_once()
+            self.assertEqual(picker.call_args.args[1], "Choose Snowbreak installation folder")
         finally:
             app.close()
             app.deleteLater()
@@ -329,7 +473,7 @@ class GuiRenderTests(unittest.TestCase):
             app._render()
             qt_app.processEvents()
 
-            self.assertEqual(app._watermark_text(), "by Tashi - v1.06")
+            self.assertEqual(app._watermark_text(), f"by Tashi - v{APP_VERSION}")
             self.assertEqual(app.top_title, "Launcher update ready")
             self.assertEqual(app.main_button.text(), "Update Launcher")
             self.assertEqual(app.status_label._text, "Launcher update available: v1.06")
