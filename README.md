@@ -1,5 +1,7 @@
 # Snowbreak Uncensor Launcher
 
+For support, ideas or questions join the Snowbreak Global Discord server: https://discord.com/invite/snowbreak-global
+
 A small Windows launcher for installing and updating Snowbreak: Containment Zone uncensor files.
 
 It detects your Snowbreak install, sets the hidden localization switch, manages the `Game\Content\Paks\~ix` mod folder, downloads the current uncensor files, and can launch the game afterward.
