@@ -22,7 +22,13 @@ from .constants import APP_NAME, APP_VERSION, GITHUB_RELEASE_PAGE
 from .detection import detect_all_installs, resolve_manual_install, validate_ix_folder
 from .download_utils import is_retryable_download_exception
 from .github_client import fetch_latest_release
-from .installer import setup_or_update, static_asset_status, uncensor_file_status, uninstall_all_managed_files
+from .installer import (
+    mod_folder_warnings,
+    obsolete_managed_items,
+    setup_or_update,
+    uncensor_file_status,
+    uninstall_all_managed_files,
+)
 from .launcher import launch_game
 from .localization import is_localization_enabled
 from .models import GitHubRelease, InstallInfo, LauncherState
@@ -36,7 +42,6 @@ from .self_update import (
     is_packaged_app,
     prepare_self_update,
 )
-from .static_assets import import_static_zip
 from .update_logic import UpdateDecision, decide_next_state
 
 
@@ -267,8 +272,8 @@ class SnowbreakLauncherApp(QWidget):
         self.top_detail = "Done."
         self.top_progress_value = 0.0
         self.core_files_installed = False
-        self.static_assets_installed = False
-        self.present_static_assets: list[str] = []
+        self.cleanup_needed = False
+        self.mod_warning_folders: list[str] = []
         self.local_install_complete = False
         self._background = _load_background_pixmap()
         self._signals = WorkerSignals()
@@ -286,7 +291,7 @@ class SnowbreakLauncherApp(QWidget):
 
     def _build_controls(self) -> None:
         self.chips: dict[str, StatusChip] = {}
-        for index, key in enumerate(("Game", "Switch", "Core", "Assets")):
+        for index, key in enumerate(("Game", "Switch", "Core", "Mods")):
             chip = StatusChip(self)
             chip.move(368 + index * 130, 45)
             self.chips[key] = chip
@@ -324,10 +329,6 @@ class SnowbreakLauncherApp(QWidget):
         self.log_button.move(116, 544 - 30)
         self.log_button.clicked.connect(self._view_log)
 
-        self.import_button = GlassButton("Import ZIP", self, width=96, height=30)
-        self.import_button.move(214, 544 - 30)
-        self.import_button.clicked.connect(self._import_static_zip)
-
     def _render(self) -> None:
         launcher_update_priority = self._launcher_update_has_priority()
         for name, (kind, text) in self._current_checklist().items():
@@ -361,7 +362,10 @@ class SnowbreakLauncherApp(QWidget):
             reason = self.decision.reason if self.decision else "Ready to install."
             title = "Game needed" if self.install is None else "Setup needed"
             self._set_top_state(title, reason, 0.0)
-            self.status_label.setText(_short_status_text(reason))
+            if self.install and self.mod_warning_folders:
+                self.status_label.setText("Make sure there are no conflicting mods.")
+            else:
+                self.status_label.setText(_short_status_text(reason))
             self.main_button.setText("Choose Folder" if self.install is None else "Install")
             self.main_button.setEnabled(True)
         elif self.ui_state == "choose_install":
@@ -412,21 +416,21 @@ class SnowbreakLauncherApp(QWidget):
                 "Game": ("idle", "Checking game"),
                 "Switch": ("idle", "Checking loc"),
                 "Core": ("idle", "Checking files"),
-                "Assets": ("idle", "Checking assets"),
+                "Mods": ("idle", "Checking mods"),
             }
         if self.ui_state == "disclaimer":
             return {
                 "Game": ("idle", "Game check"),
                 "Switch": ("idle", "loc check"),
                 "Core": ("idle", "Uncensor check"),
-                "Assets": ("idle", "Assets check"),
+                "Mods": ("idle", "Mods check"),
             }
         if self.ui_state == "choose_install":
             return {
                 "Game": ("warn", f"{len(self.detected_install_choices)} installs"),
                 "Switch": ("pending", "Choose loc"),
                 "Core": ("pending", "Uncensor pending"),
-                "Assets": ("pending", "Assets pending"),
+                "Mods": ("pending", "Mods pending"),
             }
 
         install = self.install
@@ -437,23 +441,22 @@ class SnowbreakLauncherApp(QWidget):
                 "ok" if localization_enabled else "pending",
                 "loc=1" if localization_enabled else "loc=0",
             )
-            static_ok, present_static = static_asset_status(install.ix_folder)
-            self.static_assets_installed = static_ok
-            self.present_static_assets = present_static
-            static_kind = "ok" if static_ok else "warn"
-            static_text = "Assets installed" if static_ok else "Assets missing"
-            if present_static and not static_ok:
-                static_text = f"Assets {len(present_static)}/2"
+            self.mod_warning_folders = mod_folder_warnings(install.paks_root)
+            mods = (
+                "warn" if self.mod_warning_folders else "ok",
+                "Other mods installed" if self.mod_warning_folders else "No other mods",
+            )
         else:
             game = ("warn", "Choose game")
             localization = ("pending", "loc=0")
-            static_ok = False
-            static_kind = "pending"
-            static_text = "Assets pending"
+            self.mod_warning_folders = []
+            mods = ("pending", "Mods pending")
 
         core_ok, _ = uncensor_file_status(install.ix_folder, self.state_data) if install else (False, [])
         self.core_files_installed = core_ok
-        if self.ui_state == "ready_to_update" and self.local_install_complete:
+        if self.cleanup_needed and self.local_install_complete:
+            core = ("warn", "Cleanup needed")
+        elif self.ui_state == "ready_to_update" and self.local_install_complete:
             core = ("warn", "Update available")
         elif core_ok and self.local_install_complete:
             core = ("ok", "Uncensor current")
@@ -468,7 +471,7 @@ class SnowbreakLauncherApp(QWidget):
             "Game": game,
             "Switch": localization,
             "Core": core,
-            "Assets": (static_kind, static_text),
+            "Mods": mods,
         }
 
     def _set_top_state(self, title: str, detail: str, progress: float) -> None:
@@ -484,12 +487,9 @@ class SnowbreakLauncherApp(QWidget):
             self.uninstall_button.move(x, 544 - 30)
             x += 102
         self.log_button.setVisible(show_error_tools)
-        self.import_button.setVisible(show_error_tools)
         if show_error_tools:
             self.log_button.move(x, 544 - 30)
             x += 98
-            self.import_button.move(x, 544 - 30)
-            x += 108
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
         painter = QPainter(self)
@@ -664,14 +664,19 @@ class SnowbreakLauncherApp(QWidget):
             self.busy = False
             self._render()
             return
-        static_ok = False
         core_ok = False
+        cleanup_needed = False
         if install:
-            static_ok, _ = static_asset_status(install.ix_folder)
             core_ok, _ = uncensor_file_status(install.ix_folder, self.state_data)
+            if release:
+                release_names = {asset.name for asset in release.assets}
+                cleanup_needed = bool(obsolete_managed_items(install.ix_folder, release_names))
+            self.mod_warning_folders = mod_folder_warnings(install.paks_root)
+        else:
+            self.mod_warning_folders = []
         self.core_files_installed = core_ok
-        self.static_assets_installed = static_ok
-        self.decision = decide_next_state(self.state_data, install, release, core_ok, static_ok)
+        self.cleanup_needed = cleanup_needed
+        self.decision = decide_next_state(self.state_data, install, release, core_ok, cleanup_needed=cleanup_needed)
         self.local_install_complete = self.decision.local_install_complete
         self.ui_state = self.decision.ui_state
         self.busy = False
@@ -703,7 +708,6 @@ class SnowbreakLauncherApp(QWidget):
                     self.state_data,
                     progress=lambda event: self._signals.progress.emit(event),
                     cancel_check=lambda: self.cancel_requested,
-                    install_static_pack=True,
                 )
                 self._signals.setup_done.emit("Install/update complete.")
             except OperationCancelled as exc:
@@ -842,31 +846,15 @@ class SnowbreakLauncherApp(QWidget):
             self.install = None
             self.detected_install_choices = []
             self.core_files_installed = False
-            self.static_assets_installed = False
+            self.cleanup_needed = False
+            self.mod_warning_folders = []
             self.local_install_complete = False
             self.status_label.setText(f"Uninstalled {removed} file(s)/folder(s).")
             self.ui_state = "ready_to_install"
-            self.decision = decide_next_state(self.state_data, None, self.latest_release, False, False)
+            self.decision = decide_next_state(self.state_data, None, self.latest_release, False)
             self._render()
         except Exception as exc:  # noqa: BLE001 - user-facing GUI boundary
             self._show_error(f"Uninstall failed: {exc}")
-
-    def _import_static_zip(self) -> None:
-        if not self.install and not self._choose_folder():
-            return
-        if self.install is None:
-            return
-        selected, _ = QFileDialog.getOpenFileName(self, "Choose static asset ZIP", "", "ZIP files (*.zip);;All files (*.*)")
-        if not selected:
-            return
-        try:
-            installed = import_static_zip(Path(selected), self.install.ix_folder)
-            self.status_label.setText("Imported static assets: " + ", ".join(installed))
-            self.ui_state = "checking"
-            self._render()
-            self._start_checks()
-        except Exception as exc:  # noqa: BLE001 - user-facing GUI boundary
-            self._show_error(f"Static ZIP import failed: {exc}")
 
     def _auto_update_changed(self, checked: bool) -> None:
         self.state_data.auto_update_enabled = checked
@@ -893,7 +881,7 @@ class SnowbreakLauncherApp(QWidget):
         cleanup_app_data()
         self.busy = False
         self.core_files_installed = True
-        self.static_assets_installed = True
+        self.cleanup_needed = False
         self.local_install_complete = True
         self.decision = UpdateDecision("ready_to_launch", "Launch", "Done.", local_install_complete=True)
         self.ui_state = "ready_to_launch"
@@ -977,10 +965,6 @@ def _short_status_text(text: str) -> str:
         return "Choose Snowbreak folder."
     if "update available" in lowered:
         return "Update available."
-    if "assets" in lowered and "uncensor" in lowered:
-        return "Files and assets missing."
-    if "assets" in lowered:
-        return "Assets missing."
     if "uncensor" in lowered:
         return "Uncensor missing."
     if "install" in lowered:
@@ -994,8 +978,7 @@ def _install_choice_label(install: InstallInfo) -> str:
 
 def _progress_status_text(event: ProgressEvent) -> str:
     if event.bytes_total:
-        label = "Static assets" if "static asset" in event.message.lower() else event.phase
-        return f"{label}: {_format_bytes(event.bytes_downloaded)} / {_format_bytes(event.bytes_total)}"
+        return f"{event.phase}: {_format_bytes(event.bytes_downloaded)} / {_format_bytes(event.bytes_total)}"
     return f"{event.phase}: {_short_status_text(event.message)}"
 
 

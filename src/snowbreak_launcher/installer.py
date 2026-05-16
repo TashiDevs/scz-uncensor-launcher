@@ -4,13 +4,12 @@ import shutil
 from pathlib import Path
 
 from .config import append_log, downloads_dir, save_state
-from .constants import MANAGED_FOLDER_NAME, STATIC_ASSET_NAMES
+from .constants import MANAGED_FOLDER_NAME
 from .detection import validate_ix_folder
 from .github_client import ReleaseError, download_asset, fetch_latest_release, file_sha256
 from .localization import ensure_localization_enabled
 from .models import GitHubAsset, GitHubRelease, InstallInfo, LauncherState
 from .progress import ProgressEvent, WeightedProgress
-from .static_assets import configured_static_download, download_static_zip, import_static_zip, remember_static_pack, static_pack_is_current
 
 
 def setup_or_update(
@@ -18,22 +17,13 @@ def setup_or_update(
     state: LauncherState,
     progress: callable | None = None,
     cancel_check: callable | None = None,
-    install_static_pack: bool = True,
 ) -> LauncherState:
     staging: Path | None = None
-    zip_path: Path | None = None
     try:
         reporter = WeightedProgress(progress, cancel_check)
         _progress(progress, "Checking latest uncensor release...", 0.02)
         reporter.check_cancelled()
         release = fetch_latest_release()
-
-        static_config = configured_static_download() if install_static_pack else None
-        if install_static_pack and static_config is None:
-            raise RuntimeError(
-                "The static asset direct download is not configured yet. "
-                "Check SBUL_STATIC_ASSET_URL and SBUL_STATIC_ASSET_SHA256 in .env, or import the ZIP manually."
-            )
 
         if not install.paks_root.exists():
             raise FileNotFoundError(f"Paks folder does not exist: {install.paks_root}")
@@ -43,10 +33,7 @@ def setup_or_update(
 
         assets_to_download, current_core_hashes = core_assets_needing_download(install.ix_folder, release)
 
-        static_pack_current = False
-        if static_config:
-            static_pack_current = static_pack_is_current(install.ix_folder, state, *static_config)
-        total_steps = 5 + len(assets_to_download) + (0 if static_pack_current else 2 if static_config else 0)
+        total_steps = 5 + len(assets_to_download)
         step = 0
 
         reporter.step("Prepare", "Preparing Snowbreak folders...", step, total_steps)
@@ -110,41 +97,21 @@ def setup_or_update(
             append_log(f"Kept current uncensor file: {asset.name}")
         step += 1
 
-        if static_config and static_pack_current:
-            url, expected_hash = static_config
-            remember_static_pack(install.ix_folder, state, url, expected_hash)
-            append_log("Static asset pack already installed; skipping download.")
-        elif static_config:
-            url, expected_hash = static_config
-            reporter.step("Download", "Downloading static asset pack...", step, total_steps)
-            zip_path = download_static_zip(
-                url,
-                expected_hash,
-                progress=_static_download_progress(reporter, step, total_steps),
-                cancel_check=cancel_check,
-            )
-            step += 1
-
-            reporter.step("Extract", "Extracting static asset pack...", step, total_steps)
-            import_static_zip(zip_path, install.ix_folder)
-            remember_static_pack(install.ix_folder, state, url, expected_hash)
-            step += 1
-
         state.installed_release = release.tag_name
         state.installed_files = installed_files
+        state.static_asset_pack = {}
         save_state(state)
         reporter.step("Done", f"Installed {release.tag_name}.", total_steps, total_steps)
         return state
     finally:
         _cleanup_path(staging)
-        _cleanup_path(zip_path)
 
 
 def clean_managed_folder(ix_folder: Path, preserve_names: set[str] | None = None) -> list[Path]:
     _validate_managed_folder_name(ix_folder)
     removed: list[Path] = []
     ix_folder.mkdir(parents=True, exist_ok=True)
-    preserved = {name.lower() for name in STATIC_ASSET_NAMES}
+    preserved: set[str] = set()
     if preserve_names:
         preserved.update(name.lower() for name in preserve_names)
 
@@ -158,6 +125,37 @@ def clean_managed_folder(ix_folder: Path, preserve_names: set[str] | None = None
             item.unlink(missing_ok=True)
         append_log(f"Removed from ~ix: {item.name}")
     return removed
+
+
+def mod_folder_warnings(paks_root: Path) -> list[str]:
+    if not paks_root.exists() or not paks_root.is_dir():
+        return []
+    warnings: list[str] = []
+    try:
+        children = list(paks_root.iterdir())
+    except OSError:
+        return []
+    for child in children:
+        if not child.is_dir() or child.name.lower() == MANAGED_FOLDER_NAME.lower():
+            continue
+        warnings.append(child.name)
+    return sorted(warnings, key=str.lower)
+
+
+def obsolete_managed_items(ix_folder: Path, current_release_names: set[str]) -> list[Path]:
+    if not ix_folder.exists() or not ix_folder.is_dir() or not current_release_names:
+        return []
+    current = {name.lower() for name in current_release_names}
+    obsolete: list[Path] = []
+    try:
+        children = list(ix_folder.iterdir())
+    except OSError:
+        return []
+    for item in children:
+        if item.is_file() and item.name.lower() in current:
+            continue
+        obsolete.append(item)
+    return sorted(obsolete, key=lambda path: path.name.lower())
 
 
 def uninstall_github_files(install: InstallInfo, state: LauncherState) -> int:
@@ -191,11 +189,6 @@ def uninstall_all_managed_files(install: InstallInfo, state: LauncherState) -> i
     state.static_asset_pack = {}
     save_state(state)
     return removed
-
-
-def static_asset_status(ix_folder: Path) -> tuple[bool, list[str]]:
-    present = [name for name in sorted(STATIC_ASSET_NAMES) if (ix_folder / name).is_file()]
-    return len(present) == len(STATIC_ASSET_NAMES), present
 
 
 def uncensor_file_status(ix_folder: Path, state: LauncherState) -> tuple[bool, list[str]]:
@@ -257,23 +250,6 @@ def _download_progress(reporter: WeightedProgress, step: int, total_steps: int) 
             total_steps,
             step_fraction=local,
             current_file=name,
-            bytes_downloaded=downloaded,
-            bytes_total=total,
-        )
-
-    return report
-
-
-def _static_download_progress(reporter: WeightedProgress, step: int, total_steps: int) -> callable:
-    def report(downloaded: int, total: int) -> None:
-        local = downloaded / total if total else 0.0
-        reporter.step(
-            "Download",
-            "Downloading static asset pack",
-            step,
-            total_steps,
-            step_fraction=local,
-            current_file="static-assets.zip",
             bytes_downloaded=downloaded,
             bytes_total=total,
         )

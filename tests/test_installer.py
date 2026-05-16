@@ -7,9 +7,20 @@ from pathlib import Path
 from unittest.mock import patch
 
 import tests.context  # noqa: F401
-from snowbreak_launcher.constants import STATIC_ASSET_NAMES
-from snowbreak_launcher.installer import clean_managed_folder, setup_or_update, static_asset_status, uncensor_file_status
+from snowbreak_launcher.installer import (
+    clean_managed_folder,
+    mod_folder_warnings,
+    obsolete_managed_items,
+    setup_or_update,
+    uncensor_file_status,
+)
 from snowbreak_launcher.models import GitHubAsset, GitHubRelease, InstallInfo, LauncherState
+
+
+LEGACY_STATIC_ASSET_NAMES = {
+    "character-anti-censorship_99_P.pak",
+    "illustration-anti-censorship_99_P.pak",
+}
 
 
 class InstallerTests(unittest.TestCase):
@@ -25,36 +36,49 @@ class InstallerTests(unittest.TestCase):
             localization_path=root / "Game" / "cbjq" / "localization.txt",
         )
 
-    def test_clean_managed_folder_preserves_only_static_assets(self) -> None:
+    def test_clean_managed_folder_removes_old_static_assets_when_not_in_release(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             ix = Path(temp) / "Game" / "Content" / "Paks" / "~ix"
             ix.mkdir(parents=True)
-            for name in STATIC_ASSET_NAMES:
-                (ix / name).write_text("keep", encoding="utf-8")
-            (ix / "old-uncensor.pak").write_text("remove", encoding="utf-8")
+            for name in LEGACY_STATIC_ASSET_NAMES:
+                (ix / name).write_text("remove", encoding="utf-8")
+            (ix / "current-core.pak").write_text("keep", encoding="utf-8")
             nested = ix / "nested"
             nested.mkdir()
             (nested / "file.txt").write_text("remove", encoding="utf-8")
 
-            removed = clean_managed_folder(ix)
+            removed = clean_managed_folder(ix, preserve_names={"current-core.pak"})
 
-            self.assertEqual({path.name for path in removed}, {"old-uncensor.pak", "nested"})
-            for name in STATIC_ASSET_NAMES:
-                self.assertTrue((ix / name).exists())
-            self.assertFalse((ix / "old-uncensor.pak").exists())
+            self.assertEqual({path.name for path in removed}, {*LEGACY_STATIC_ASSET_NAMES, "nested"})
+            for name in LEGACY_STATIC_ASSET_NAMES:
+                self.assertFalse((ix / name).exists())
+            self.assertTrue((ix / "current-core.pak").exists())
             self.assertFalse(nested.exists())
 
-    def test_static_status_reports_partial_install(self) -> None:
+    def test_obsolete_managed_items_reports_old_static_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             ix = Path(temp) / "Game" / "Content" / "Paks" / "~ix"
             ix.mkdir(parents=True)
-            one_name = sorted(STATIC_ASSET_NAMES)[0]
-            (ix / one_name).write_text("present", encoding="utf-8")
+            for name in LEGACY_STATIC_ASSET_NAMES:
+                (ix / name).write_text("old static", encoding="utf-8")
+            (ix / "current-core.pak").write_text("keep", encoding="utf-8")
 
-            ok, present = static_asset_status(ix)
+            obsolete = obsolete_managed_items(ix, {"current-core.pak"})
 
-            self.assertFalse(ok)
-            self.assertEqual(present, [one_name])
+            self.assertEqual({path.name for path in obsolete}, LEGACY_STATIC_ASSET_NAMES)
+
+    def test_mod_folder_warnings_reports_direct_non_ix_folders_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            paks = Path(temp) / "Game" / "Content" / "Paks"
+            paks.mkdir(parents=True)
+            (paks / "~ix").mkdir()
+            (paks / "LegacyUncensor").mkdir()
+            (paks / "core.pak").write_text("pak", encoding="utf-8")
+            (paks / "LegacyUncensor" / "nested").mkdir()
+
+            warnings = mod_folder_warnings(paks)
+
+            self.assertEqual(warnings, ["LegacyUncensor"])
 
     def test_uncensor_status_requires_tracked_files_to_exist(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -71,7 +95,7 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse(ok)
             self.assertEqual(present, ["core-a.pak"])
 
-    def test_setup_update_skips_static_download_when_pack_is_current(self) -> None:
+    def test_setup_update_does_not_require_static_asset_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             install = self._install(root)
@@ -79,8 +103,6 @@ class InstallerTests(unittest.TestCase):
             install.localization_path.parent.mkdir(parents=True)
             install.localization_path.write_text("localization = 1\n", encoding="utf-8")
             install.ix_folder.mkdir(parents=True)
-            for name in STATIC_ASSET_NAMES:
-                (install.ix_folder / name).write_text(f"static-{name}", encoding="utf-8")
 
             release = GitHubRelease(
                 tag_name="AntiAmend-new",
@@ -100,20 +122,15 @@ class InstallerTests(unittest.TestCase):
 
             with (
                 patch("snowbreak_launcher.installer.fetch_latest_release", return_value=release),
-                patch("snowbreak_launcher.installer.configured_static_download", return_value=("https://example.invalid/static.zip", "static-hash")),
                 patch("snowbreak_launcher.installer.download_asset", side_effect=fake_download_asset),
                 patch("snowbreak_launcher.installer.file_sha256", return_value="core-hash"),
                 patch("snowbreak_launcher.installer._fresh_staging_dir", return_value=staging),
-                patch("snowbreak_launcher.installer.download_static_zip") as download_static_zip,
-                patch("snowbreak_launcher.installer.import_static_zip") as import_static_zip,
                 patch("snowbreak_launcher.installer.save_state"),
             ):
                 updated = setup_or_update(install, state)
 
-            download_static_zip.assert_not_called()
-            import_static_zip.assert_not_called()
             self.assertEqual(updated.installed_release, "AntiAmend-new")
-            self.assertEqual(updated.static_asset_pack["sha256"], "static-hash")
+            self.assertEqual(updated.static_asset_pack, {})
 
     def test_setup_update_skips_unchanged_github_asset_and_removes_obsolete(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -145,7 +162,7 @@ class InstallerTests(unittest.TestCase):
                 patch("snowbreak_launcher.installer.download_asset") as download_asset,
                 patch("snowbreak_launcher.installer.save_state"),
             ):
-                updated = setup_or_update(install, state, install_static_pack=False)
+                updated = setup_or_update(install, state)
 
             download_asset.assert_not_called()
             self.assertTrue((install.ix_folder / "core-a.pak").is_file())
@@ -185,7 +202,7 @@ class InstallerTests(unittest.TestCase):
                 patch("snowbreak_launcher.installer.download_asset", side_effect=fake_download_asset),
                 patch("snowbreak_launcher.installer.save_state"),
             ):
-                updated = setup_or_update(install, LauncherState(installed_release="AntiAmend-old"), install_static_pack=False)
+                updated = setup_or_update(install, LauncherState(installed_release="AntiAmend-old"))
 
             self.assertEqual(downloaded, ["core-b.pak", "core-c.pak"])
             self.assertEqual((install.ix_folder / "core-a.pak").read_text(encoding="utf-8"), "core-a-current")
@@ -193,6 +210,36 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual((install.ix_folder / "core-c.pak").read_text(encoding="utf-8"), "core-c-new")
             self.assertFalse((install.ix_folder / "removed-core.pak").exists())
             self.assertEqual(set(updated.installed_files), {"core-a.pak", "core-b.pak", "core-c.pak"})
+
+    def test_setup_update_removes_old_static_assets_from_ix(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            install = self._install(root)
+            install.paks_root.mkdir(parents=True)
+            install.localization_path.parent.mkdir(parents=True)
+            install.localization_path.write_text("localization = 1\n", encoding="utf-8")
+            install.ix_folder.mkdir(parents=True)
+            for name in LEGACY_STATIC_ASSET_NAMES:
+                (install.ix_folder / name).write_text("old static", encoding="utf-8")
+            (install.ix_folder / "core.pak").write_text("core-current", encoding="utf-8")
+
+            release = GitHubRelease(
+                tag_name="AntiAmend-new",
+                html_url="https://example.invalid",
+                assets=(GitHubAsset("core.pak", 12, self._sha("core-current"), "https://example.invalid/core.pak"),),
+            )
+
+            with (
+                patch("snowbreak_launcher.installer.fetch_latest_release", return_value=release),
+                patch("snowbreak_launcher.installer.download_asset") as download_asset,
+                patch("snowbreak_launcher.installer.save_state"),
+            ):
+                updated = setup_or_update(install, LauncherState(installed_release="AntiAmend-old"))
+
+            download_asset.assert_not_called()
+            for name in LEGACY_STATIC_ASSET_NAMES:
+                self.assertFalse((install.ix_folder / name).exists())
+            self.assertEqual(updated.installed_files, {"core.pak": self._sha("core-current")})
 
     def test_setup_update_removes_github_staging_after_success(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -219,39 +266,9 @@ class InstallerTests(unittest.TestCase):
                 patch("snowbreak_launcher.installer.download_asset", side_effect=fake_download_asset),
                 patch("snowbreak_launcher.installer.save_state"),
             ):
-                setup_or_update(install, LauncherState(), install_static_pack=False)
-
-            self.assertFalse(staging.exists())
-
-    def test_setup_update_removes_static_zip_after_import(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            install = self._install(root)
-            install.paks_root.mkdir(parents=True)
-            install.localization_path.parent.mkdir(parents=True)
-            install.localization_path.write_text("localization = 1\n", encoding="utf-8")
-            install.ix_folder.mkdir(parents=True)
-            zip_path = root / "downloads" / "snowbreak-static-assets.zip"
-            zip_path.parent.mkdir()
-            zip_path.write_text("zip", encoding="utf-8")
-            release = GitHubRelease("AntiAmend-new", "https://example.invalid", assets=())
-
-            def fake_import_static_zip(path: Path, ix_folder: Path) -> list[str]:
-                for name in STATIC_ASSET_NAMES:
-                    (ix_folder / name).write_text(name, encoding="utf-8")
-                return sorted(STATIC_ASSET_NAMES)
-
-            with (
-                patch("snowbreak_launcher.installer.fetch_latest_release", return_value=release),
-                patch("snowbreak_launcher.installer.configured_static_download", return_value=("https://example.invalid/static.zip", "static-hash")),
-                patch("snowbreak_launcher.installer.download_static_zip", return_value=zip_path),
-                patch("snowbreak_launcher.installer.import_static_zip", side_effect=fake_import_static_zip),
-                patch("snowbreak_launcher.installer.save_state"),
-            ):
                 setup_or_update(install, LauncherState())
 
-            self.assertFalse(zip_path.exists())
-
+            self.assertFalse(staging.exists())
 
 if __name__ == "__main__":
     unittest.main()

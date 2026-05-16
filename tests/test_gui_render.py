@@ -10,8 +10,7 @@ from unittest.mock import patch
 
 import tests.context  # noqa: F401
 from snowbreak_launcher.constants import APP_VERSION
-from snowbreak_launcher.constants import STATIC_ASSET_NAMES
-from snowbreak_launcher.models import GitHubRelease, InstallInfo, LauncherState
+from snowbreak_launcher.models import GitHubAsset, GitHubRelease, InstallInfo, LauncherState
 from snowbreak_launcher.self_update import LauncherUpdateInfo
 from snowbreak_launcher.update_logic import UpdateDecision
 
@@ -44,8 +43,6 @@ class GuiRenderTests(unittest.TestCase):
             root = Path(temp) / "Snowbreak"
             ix = root / "Game" / "Content" / "Paks" / "~ix"
             ix.mkdir(parents=True)
-            for name in STATIC_ASSET_NAMES:
-                (ix / name).write_text("static", encoding="utf-8")
             localization = root / "Game" / "cbjq" / "localization.txt"
             localization.parent.mkdir(parents=True)
             localization.write_text("localization = 1\n", encoding="utf-8")
@@ -212,7 +209,8 @@ class GuiRenderTests(unittest.TestCase):
                 self.assertEqual(app.chips["Game"]._text, "Steam found")
                 self.assertEqual(app.chips["Switch"]._text, "loc=1")
                 self.assertEqual(app.chips["Core"]._text, "Uncensor missing")
-                self.assertEqual(app.chips["Assets"]._text, "Assets missing")
+                self.assertEqual(app.chips["Mods"]._text, "No other mods")
+                self.assertNotIn("Assets", app.chips)
                 self.assertTrue(app.uninstall_button.isHidden())
                 self.assertTrue(app.auto_update_pill.isHidden())
             finally:
@@ -389,8 +387,6 @@ class GuiRenderTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             install = self._make_install(temp)
-            for name in STATIC_ASSET_NAMES:
-                (install.ix_folder / name).write_text("static", encoding="utf-8")
             (install.ix_folder / "core.pak").write_text("core", encoding="utf-8")
             state = LauncherState(
                 accepted_notice=True,
@@ -412,12 +408,93 @@ class GuiRenderTests(unittest.TestCase):
                 self.assertEqual(app.top_title, "Update ready")
                 self.assertEqual(app.main_button.text(), "Update")
                 self.assertEqual(app.chips["Core"]._text, "Update available")
-                self.assertEqual(app.chips["Assets"]._text, "Assets installed")
+                self.assertEqual(app.chips["Mods"]._text, "No other mods")
+                self.assertNotIn("Assets", app.chips)
                 self.assertFalse(app.uninstall_button.isHidden())
                 self.assertFalse(app.auto_update_pill.isHidden())
             finally:
                 app.close()
                 app.deleteLater()
+
+    def test_current_install_with_obsolete_ix_files_renders_as_update_cleanup(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with tempfile.TemporaryDirectory() as temp:
+            install = self._make_install(temp)
+            (install.ix_folder / "core.pak").write_text("core-current", encoding="utf-8")
+            (install.ix_folder / "character-anti-censorship_99_P.pak").write_text("old static", encoding="utf-8")
+            state = LauncherState(
+                accepted_notice=True,
+                installed_release="AntiAmend-current",
+                installed_files={"core.pak": _sha("core-current")},
+            )
+            release = GitHubRelease(
+                "AntiAmend-current",
+                "https://example.invalid",
+                assets=(GitHubAsset("core.pak", 12, _sha("core-current"), "https://example.invalid/core.pak"),),
+            )
+
+            with (
+                patch("snowbreak_launcher.app.load_state", return_value=state),
+                patch("snowbreak_launcher.app.cleanup_app_data"),
+            ):
+                qt_app = create_application([])
+                app = SnowbreakLauncherApp()
+            try:
+                app._finish_checks(install, release)
+                qt_app.processEvents()
+
+                self.assertEqual(app.ui_state, "ready_to_update")
+                self.assertEqual(app.main_button.text(), "Update")
+                self.assertEqual(app.status_label._text, "Cleanup needed.")
+                self.assertEqual(app.chips["Core"]._text, "Cleanup needed")
+            finally:
+                app.close()
+                app.deleteLater()
+
+    def test_mod_folder_warning_shows_for_first_install(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with tempfile.TemporaryDirectory() as temp:
+            install = self._make_install(temp)
+            (install.paks_root / "OldUncensor").mkdir()
+
+            with (
+                patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+                patch("snowbreak_launcher.app.cleanup_app_data"),
+            ):
+                qt_app = create_application([])
+                app = SnowbreakLauncherApp()
+            try:
+                app._finish_checks(install, GitHubRelease("AntiAmend-current", "https://example.invalid", assets=()))
+                qt_app.processEvents()
+
+                self.assertEqual(app.ui_state, "ready_to_install")
+                self.assertEqual(app.chips["Mods"]._text, "Other mods installed")
+                self.assertEqual(app.status_label._text, "Make sure there are no conflicting mods.")
+            finally:
+                app.close()
+                app.deleteLater()
+
+    def test_static_asset_controls_are_removed_from_ui(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with (
+            patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+            patch("snowbreak_launcher.app.cleanup_app_data"),
+        ):
+            qt_app = create_application([])
+            app = SnowbreakLauncherApp()
+        try:
+            self.assertNotIn("Assets", app.chips)
+            self.assertIn("Mods", app.chips)
+            self.assertFalse(hasattr(app, "import_button"))
+        finally:
+            app.close()
+            app.deleteLater()
 
     def test_launch_closes_window_after_command(self) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
