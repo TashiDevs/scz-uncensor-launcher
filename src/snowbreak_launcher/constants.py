@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 APP_NAME = "Snowbreak Uncensor Launcher"
-APP_VERSION = "1.08"
+APP_VERSION = "1.09"
 APP_DATA_DIR_NAME = "SnowbreakUncensorLauncher"
 
 STEAM_APP_ID = "2668080"

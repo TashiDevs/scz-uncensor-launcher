@@ -75,6 +75,7 @@ class GuiRenderTests(unittest.TestCase):
                     "installing",
                     "updating",
                     "admin_needed",
+                    "write_blocked",
                     "ready_to_launch",
                     "error",
                 ):
@@ -84,6 +85,55 @@ class GuiRenderTests(unittest.TestCase):
             finally:
                 app.close()
                 app.deleteLater()
+
+    def test_write_blocked_state_shows_retry_and_open_ix(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with tempfile.TemporaryDirectory() as temp:
+            install = self._make_install(temp)
+            with (
+                patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+                patch("snowbreak_launcher.app.cleanup_app_data"),
+            ):
+                qt_app = create_application([])
+                app = SnowbreakLauncherApp()
+            try:
+                app.install = install
+                app._last_action = "setup"
+                app._show_error("Snowbreak files are read-only or locked.", kind="write_blocked")
+                qt_app.processEvents()
+
+                self.assertEqual(app.ui_state, "write_blocked")
+                self.assertEqual(app.top_title, "Folder blocked")
+                self.assertEqual(app.top_detail, "Snowbreak files are read-only or locked.")
+                self.assertEqual(app.status_label._text, "Fix the folder, then retry.")
+                self.assertEqual(app.main_button.text(), "Retry")
+                self.assertTrue(app.grant_admin_button.isHidden())
+                self.assertFalse(app.open_ix_button.isHidden())
+            finally:
+                app.close()
+                app.deleteLater()
+
+    def test_write_blocked_retry_repeats_setup_action(self) -> None:
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from snowbreak_launcher.app import SnowbreakLauncherApp, create_application
+
+        with (
+            patch("snowbreak_launcher.app.load_state", return_value=LauncherState(accepted_notice=True)),
+            patch("snowbreak_launcher.app.cleanup_app_data"),
+        ):
+            qt_app = create_application([])
+            app = SnowbreakLauncherApp()
+        try:
+            app._last_action = "setup"
+            app.ui_state = "write_blocked"
+            with patch.object(app, "_start_setup_or_update") as start_setup:
+                app._main_action()
+            start_setup.assert_called_once()
+        finally:
+            app.close()
+            app.deleteLater()
 
     def test_admin_needed_state_shows_cancel_and_grant_admin(self) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -159,6 +209,22 @@ class GuiRenderTests(unittest.TestCase):
             finally:
                 app.close()
                 app.deleteLater()
+
+    def test_setup_permission_error_classification_uses_write_blocked_when_admin_would_not_help(self) -> None:
+        from snowbreak_launcher.app import _setup_error_kind
+
+        with tempfile.TemporaryDirectory() as temp:
+            install = self._make_install(temp)
+            with patch("snowbreak_launcher.app.install_requires_admin", return_value=False):
+                self.assertEqual(_setup_error_kind(PermissionError("read only"), install), "write_blocked")
+
+    def test_setup_permission_error_classification_keeps_admin_for_protected_unelevated_install(self) -> None:
+        from snowbreak_launcher.app import _setup_error_kind
+
+        with tempfile.TemporaryDirectory() as temp:
+            install = self._make_install(temp)
+            with patch("snowbreak_launcher.app.install_requires_admin", return_value=True):
+                self.assertEqual(_setup_error_kind(PermissionError("protected"), install), "permission")
 
     def test_cancel_button_uses_short_status_text(self) -> None:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

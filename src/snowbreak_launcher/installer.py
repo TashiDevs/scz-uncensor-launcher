@@ -9,6 +9,7 @@ from .detection import validate_ix_folder
 from .github_client import ReleaseError, download_asset, fetch_latest_release, file_sha256
 from .localization import ensure_localization_enabled
 from .models import GitHubAsset, GitHubRelease, InstallInfo, LauncherState
+from .permissions import clear_readonly_for_launcher_path
 from .progress import ProgressEvent, WeightedProgress
 
 
@@ -28,6 +29,7 @@ def setup_or_update(
         if not install.paks_root.exists():
             raise FileNotFoundError(f"Paks folder does not exist: {install.paks_root}")
         validate_ix_folder(install.paks_root, install.ix_folder)
+        clear_readonly_for_launcher_path(install.paks_root, paks_root=install.paks_root)
         install.ix_folder.mkdir(parents=True, exist_ok=True)
         reporter.check_cancelled()
 
@@ -78,6 +80,8 @@ def setup_or_update(
                 raise RuntimeError("Download staging folder was not prepared.")
             source = staging / asset.name
             target = install.ix_folder / asset.name
+            if target.exists():
+                clear_readonly_for_launcher_path(target, ix_folder=install.ix_folder)
             shutil.copy2(source, target)
             actual_hash = file_sha256(target).lower()
             if actual_hash != asset.sha256.lower():
@@ -119,6 +123,7 @@ def clean_managed_folder(ix_folder: Path, preserve_names: set[str] | None = None
         if item.is_file() and item.name.lower() in preserved:
             continue
         removed.append(item)
+        clear_readonly_for_launcher_path(item, ix_folder=ix_folder)
         if item.is_dir() and not item.is_symlink():
             shutil.rmtree(item)
         else:
@@ -164,6 +169,7 @@ def uninstall_github_files(install: InstallInfo, state: LauncherState) -> int:
     for filename in list(state.installed_files):
         target = install.ix_folder / filename
         if target.exists() and target.is_file():
+            clear_readonly_for_launcher_path(target, ix_folder=install.ix_folder)
             target.unlink()
             removed += 1
             append_log(f"Uninstalled {filename}")
@@ -178,6 +184,7 @@ def uninstall_all_managed_files(install: InstallInfo, state: LauncherState) -> i
     removed = 0
     install.ix_folder.mkdir(parents=True, exist_ok=True)
     for item in install.ix_folder.iterdir():
+        clear_readonly_for_launcher_path(item, ix_folder=install.ix_folder)
         if item.is_dir() and not item.is_symlink():
             shutil.rmtree(item)
         else:

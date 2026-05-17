@@ -3,11 +3,15 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .permissions import clear_readonly_for_launcher_path
+
 
 LOCALIZATION_LINE = "localization = 1"
 
 
 def ensure_localization_enabled(path: Path) -> str:
+    if not path.exists():
+        clear_readonly_for_launcher_path(path.parent, localization_parent=path.parent)
     path.parent.mkdir(parents=True, exist_ok=True)
     original = ""
     if path.exists():
@@ -15,6 +19,7 @@ def ensure_localization_enabled(path: Path) -> str:
 
     updated = _updated_localization_text(original)
     if updated != original:
+        clear_readonly_for_launcher_path(path, localization_path=path)
         path.write_text(updated, encoding="utf-8")
         return f"Updated {path.name}."
     return f"{path.name} is already enabled."

@@ -55,6 +55,37 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue((ix / "current-core.pak").exists())
             self.assertFalse(nested.exists())
 
+    def test_clean_managed_folder_clears_readonly_before_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            ix = Path(temp) / "Game" / "Content" / "Paks" / "~ix"
+            ix.mkdir(parents=True)
+            target = ix / "old-core.pak"
+            target.write_text("remove", encoding="utf-8")
+
+            with patch("snowbreak_launcher.installer.clear_readonly_for_launcher_path") as clear_readonly:
+                clean_managed_folder(ix, preserve_names={"current-core.pak"})
+
+            clear_readonly.assert_called_once_with(target, ix_folder=ix)
+
+    def test_setup_update_clears_paks_root_before_creating_ix_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            install = self._install(root)
+            install.paks_root.mkdir(parents=True)
+            install.localization_path.parent.mkdir(parents=True)
+            install.localization_path.write_text("localization = 1\n", encoding="utf-8")
+            release = GitHubRelease("AntiAmend-new", "https://example.invalid", assets=())
+
+            with (
+                patch("snowbreak_launcher.installer.fetch_latest_release", return_value=release),
+                patch("snowbreak_launcher.installer.clear_readonly_for_launcher_path") as clear_readonly,
+                patch("snowbreak_launcher.installer.save_state"),
+            ):
+                setup_or_update(install, LauncherState())
+
+            clear_readonly.assert_any_call(install.paks_root, paks_root=install.paks_root)
+            self.assertTrue(install.ix_folder.exists())
+
     def test_obsolete_managed_items_reports_old_static_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             ix = Path(temp) / "Game" / "Content" / "Paks" / "~ix"
@@ -210,6 +241,36 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual((install.ix_folder / "core-c.pak").read_text(encoding="utf-8"), "core-c-new")
             self.assertFalse((install.ix_folder / "removed-core.pak").exists())
             self.assertEqual(set(updated.installed_files), {"core-a.pak", "core-b.pak", "core-c.pak"})
+
+    def test_setup_update_clears_readonly_before_overwriting_existing_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            install = self._install(root)
+            install.paks_root.mkdir(parents=True)
+            install.localization_path.parent.mkdir(parents=True)
+            install.localization_path.write_text("localization = 1\n", encoding="utf-8")
+            install.ix_folder.mkdir(parents=True)
+            target = install.ix_folder / "core.pak"
+            target.write_text("old", encoding="utf-8")
+            release = GitHubRelease(
+                tag_name="AntiAmend-new",
+                html_url="https://example.invalid",
+                assets=(GitHubAsset("core.pak", 4, self._sha("core"), "https://example.invalid/core.pak"),),
+            )
+
+            def fake_download_asset(asset: GitHubAsset, destination: Path, *args, **kwargs) -> None:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text("core", encoding="utf-8")
+
+            with (
+                patch("snowbreak_launcher.installer.fetch_latest_release", return_value=release),
+                patch("snowbreak_launcher.installer.download_asset", side_effect=fake_download_asset),
+                patch("snowbreak_launcher.installer.clear_readonly_for_launcher_path") as clear_readonly,
+                patch("snowbreak_launcher.installer.save_state"),
+            ):
+                setup_or_update(install, LauncherState(installed_release="AntiAmend-old"))
+
+            clear_readonly.assert_any_call(target, ix_folder=install.ix_folder)
 
     def test_setup_update_removes_old_static_assets_from_ix(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

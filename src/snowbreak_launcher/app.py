@@ -317,6 +317,10 @@ class SnowbreakLauncherApp(QWidget):
         self.grant_admin_button.move(386, 438)
         self.grant_admin_button.clicked.connect(self._grant_admin)
 
+        self.open_ix_button = GlassButton("Open ~ix", self, width=112, height=30)
+        self.open_ix_button.move(394, 438)
+        self.open_ix_button.clicked.connect(self._open_ix_folder)
+
         self.skip_update_button = GlassButton("Skip", self, width=88, height=30)
         self.skip_update_button.move(406, 398)
         self.skip_update_button.clicked.connect(self._skip_launcher_update)
@@ -346,6 +350,7 @@ class SnowbreakLauncherApp(QWidget):
         self.auto_update_pill.setVisible(show_installed_controls and self.ui_state == "ready_to_update" and not launcher_update_priority)
         self.cancel_button.setVisible(self.ui_state in {"installing", "updating"})
         self.grant_admin_button.setVisible(self.ui_state == "admin_needed")
+        self.open_ix_button.setVisible(self.ui_state == "write_blocked")
         self.skip_update_button.setVisible(launcher_update_priority)
 
         if self.ui_state == "disclaimer":
@@ -388,6 +393,11 @@ class SnowbreakLauncherApp(QWidget):
             self._set_top_state("Admin needed", "Snowbreak is in a protected folder.", 0.0)
             self.status_label.setText("Move the game install, or grant admin for this patch.")
             self.main_button.setText("Cancel")
+            self.main_button.setEnabled(True)
+        elif self.ui_state == "write_blocked":
+            self._set_top_state("Folder blocked", "Snowbreak files are read-only or locked.", 0.0)
+            self.status_label.setText("Fix the folder, then retry.")
+            self.main_button.setText("Retry")
             self.main_button.setEnabled(True)
         elif self.ui_state == "self_updating":
             self._set_top_state("Updating launcher", "Downloading and preparing the new launcher.", self.top_progress_value)
@@ -562,6 +572,13 @@ class SnowbreakLauncherApp(QWidget):
             self._launch_game()
         elif self.ui_state == "admin_needed":
             self.close()
+        elif self.ui_state == "write_blocked":
+            if self._last_action == "setup":
+                self._start_setup_or_update()
+            else:
+                self.ui_state = "checking"
+                self._render()
+                self._start_checks()
         elif self.ui_state == "error":
             if self.error_kind == "network_retry":
                 if self._last_action == "setup":
@@ -715,8 +732,8 @@ class SnowbreakLauncherApp(QWidget):
                 self._signals.cancelled.emit(str(exc))
             except Exception as exc:  # noqa: BLE001 - user-facing GUI boundary
                 append_log(f"Setup failed: {exc}")
-                kind = _error_kind(exc)
-                self._signals.error.emit(_friendly_error_message(exc, fallback=str(exc)), kind)
+                kind = _setup_error_kind(exc, self.install)
+                self._signals.error.emit(_friendly_error_message(exc, fallback=str(exc), kind=kind), kind)
 
         self._run_worker(work)
 
@@ -865,6 +882,12 @@ class SnowbreakLauncherApp(QWidget):
         path.touch(exist_ok=True)
         os.startfile(path)  # type: ignore[attr-defined]
 
+    def _open_ix_folder(self) -> None:
+        if not self.install:
+            return
+        target = self.install.ix_folder if self.install.ix_folder.exists() else self.install.paks_root
+        os.startfile(target)  # type: ignore[attr-defined]
+
     def _run_worker(self, target: callable) -> None:
         self.busy = True
         threading.Thread(target=target, daemon=True).start()
@@ -909,9 +932,21 @@ class SnowbreakLauncherApp(QWidget):
         append_log(message)
         self._render()
 
+    def _show_write_blocked(self, message: str) -> None:
+        cleanup_app_data()
+        self.busy = False
+        self.error_kind = "write_blocked"
+        self.ui_state = "write_blocked"
+        self.status_label.setText("Fix the folder, then retry.")
+        append_log(message)
+        self._render()
+
     def _show_error(self, message: str, kind: str = "generic") -> None:
         if kind == "permission":
             self._show_admin_needed(message)
+            return
+        if kind == "write_blocked":
+            self._show_write_blocked(message)
             return
         if kind != "network_retry":
             cleanup_app_data()
@@ -1012,10 +1047,19 @@ def _error_kind(exc: BaseException) -> str:
     return "generic"
 
 
-def _friendly_error_message(exc: BaseException, *, fallback: str) -> str:
-    kind = _error_kind(exc)
+def _setup_error_kind(exc: BaseException, install: InstallInfo | None) -> str:
+    for current in _exception_chain(exc):
+        if isinstance(current, PermissionError):
+            return "permission" if install and install_requires_admin(install) else "write_blocked"
+    return _error_kind(exc)
+
+
+def _friendly_error_message(exc: BaseException, *, fallback: str, kind: str | None = None) -> str:
+    kind = kind or _error_kind(exc)
     if kind == "permission":
         return "Snowbreak is in a protected folder."
+    if kind == "write_blocked":
+        return "Snowbreak files are read-only or locked."
     if kind == "network_retry":
         return "Download failed. Check your connection and retry."
     return fallback
