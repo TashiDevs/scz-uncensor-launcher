@@ -10,6 +10,8 @@ Uses
 https://github.com/ahalpha/Snowbreak-AnitAmend
 as the base.
 
+![Screenshot of the app](assets/images/screenshot.png)
+
 ## Download
 
 Download the latest `SnowbreakUncensorLauncher.exe` from the GitHub Releases page and run it.
