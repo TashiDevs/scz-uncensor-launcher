@@ -10,7 +10,7 @@ Uses
 https://github.com/ahalpha/Snowbreak-AnitAmend
 as the base.
 
-![Screenshot of the app](assets/images/screenshot.png)
+![Screenshot of the app](assets/images/sceenshot.png)
 
 ## Download
 
